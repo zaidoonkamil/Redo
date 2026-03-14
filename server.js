@@ -55,8 +55,8 @@ const io = new Server(server, {
     await sequelize.sync({ force: false });
     console.log("✅ Database & tables synced!");
 
-    server.listen(process.env.PORT || 1003, () => {
-      console.log(`🚀 Server running on http://localhost:${process.env.PORT || 1003}`);
+    server.listen(process.env.PORT || 1004, () => {
+      console.log(`🚀 Server running on http://localhost:${process.env.PORT || 1004}`);
     });
   } catch (err) {
     console.error("❌ Startup error:", err);
