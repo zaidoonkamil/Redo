@@ -504,11 +504,25 @@ const init = async (io) => {
               "30",
               "ASC",
             ])
+            
             .catch((e) => {
               console.error("❌ GEORADIUS error", e.message);
               return [];
             });
 
+          console.log("🚕 MATCH DEBUG START");
+          console.log("pickup=", pickup.lat, pickup.lng);
+          console.log("radiusM=", radiusM);
+          console.log("redisUrl=", process.env.REDIS_URL);
+
+          const onlineNow = await redisClient.sMembers("drivers:online");
+          console.log("drivers:online =", onlineNow);
+
+          const geoNow = await redisClient.sendCommand(["ZRANGE", "drivers:geo", "0", "-1"]);
+          console.log("drivers:geo =", geoNow);
+
+          console.log("nearby raw =", nearby);
+          
           const driverIds = (nearby || []).map(String).slice(0, 30);
 
           let sentCount = 0;
@@ -516,23 +530,31 @@ const init = async (io) => {
 
           for (const did of driverIds) {
             const isOnline = await redisClient.sIsMember("drivers:online", String(did));
-            if (!isOnline) continue;
-
             const busyRideId = await redisClient.get(`driver:busy:${did}`);
-            if (busyRideId) continue;
-
             const rejectedKey = `request:rejected:${newReq.id}`;
             const isRejected = await redisClient.sIsMember(rejectedKey, String(did));
-            if (isRejected) continue;
-
             const isDebtBlocked = await redisClient.sIsMember("drivers:debt_blocked", String(did));
+            const driverSocketId = await redisClient.get(`socket:driver:${did}`);
+
+            console.log("candidate=", {
+              did,
+              isOnline,
+              busyRideId,
+              isRejected,
+              isDebtBlocked,
+              driverSocketId,
+            });
+
+            if (!isOnline) continue;
+            if (busyRideId) continue;
+            if (isRejected) continue;
             if (isDebtBlocked) continue;
 
-            const driverSocketId = await redisClient.get(`socket:driver:${did}`);
             if (driverSocketId && ioInstance) {
               ioInstance.to(driverSocketId).emit("request:new", { request: newReq });
               sentCount++;
               await redisClient.sAdd(sentKey, String(did));
+              console.log("✅ emitted request:new to driver", did);
             }
           }
 
