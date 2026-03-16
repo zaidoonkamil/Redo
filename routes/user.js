@@ -22,7 +22,7 @@ function hashOtp(code) {
   return crypto.createHash("sha256").update(code).digest("hex");
 }
 
-router.post("/admin/db/add-service-type-column", requireAdmin, async (req, res) => {
+router.post("/admin/db/add-service-type-column",  async (req, res) => {
   try {
     const { User, RideRequest, PricingSetting } = require("../models");
     const sequelize = User.sequelize;
