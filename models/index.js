@@ -3,11 +3,13 @@ const UserDevice = require("./user_device");
 const RideRequest = require("./ride_request");
 const RideEvent = require("./ride_event");
 const PricingSetting = require("./pricing_setting");
+const PricingTier = require("./pricing_tier");
 const SystemSetting = require("./system_setting");
 const DriverDebtLedger = require("./driver_debt_ledger");
 const ChatMessage = require("./ChatMessage");
 const OtpCode = require("./OtpCode");
 const PasswordResetOtp = require("./PasswordResetOtp");
+const pricingTier = require("./pricing_tier");
 
 User.hasMany(UserDevice, { foreignKey: "user_id", as: "devices", onDelete: "CASCADE" });
 UserDevice.belongsTo(User, { foreignKey: "user_id", as: "user" });
@@ -37,9 +39,11 @@ module.exports = {
   RideRequest,
   RideEvent,
   PricingSetting,
+  PricingTier,
   SystemSetting,
   DriverDebtLedger,
   ChatMessage,
   OtpCode,
+  pricingTier,
   PasswordResetOtp,
 };

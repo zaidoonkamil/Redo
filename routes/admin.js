@@ -1,11 +1,71 @@
 const express = require("express");
 const router = express.Router();
 const { requireAdmin } = require("./user");
-const { PricingSetting, RideRequest, User } = require("../models");
+const { PricingSetting, PricingTier, RideRequest, User } = require("../models");
 const { Op } = require("sequelize");
 const redisService = require("../services/redis");
 const socketService = require("../services/socket");
 const notifications = require("../services/notifications");
+const sequelize = require("../config/db");
+
+const TIER_EPSILON = 1e-4;
+
+const validateTierPayload = (tiers) => {
+  if (!Array.isArray(tiers) || !tiers.length) {
+    throw new Error("tiers array required");
+  }
+
+  const normalized = tiers
+    .map((tier, idx) => ({
+      idx,
+      fromKm: parseFloat(tier.fromKm),
+      toKm: tier.toKm == null ? null : parseFloat(tier.toKm),
+      pricePerKm: parseFloat(tier.pricePerKm),
+    }))
+    .sort((a, b) => a.fromKm - b.fromKm);
+
+  const first = normalized[0];
+  if (!Number.isFinite(first.fromKm) || Math.abs(first.fromKm - 0) > TIER_EPSILON) {
+    throw new Error("first tier must start at 0 km");
+  }
+
+  let prevEnd = null;
+
+  normalized.forEach((tier, index) => {
+    if (!Number.isFinite(tier.fromKm) || tier.fromKm < 0) {
+      throw new Error(`tier ${index + 1} has invalid fromKm`);
+    }
+    if (tier.toKm != null && (!Number.isFinite(tier.toKm) || tier.toKm <= tier.fromKm)) {
+      throw new Error(`tier ${index + 1} must have toKm greater than fromKm`);
+    }
+    if (tier.pricePerKm == null || !Number.isFinite(tier.pricePerKm) || tier.pricePerKm <= 0) {
+      throw new Error(`tier ${index + 1} pricePerKm must be > 0`);
+    }
+
+    if (index === 0) {
+      prevEnd = tier.toKm;
+    } else {
+      if (prevEnd == null) {
+        throw new Error("open-ended tier must be last");
+      }
+      if (Math.abs(tier.fromKm - prevEnd) > TIER_EPSILON) {
+        throw new Error(`tier ${index + 1} must start where previous tier ends`);
+      }
+      prevEnd = tier.toKm;
+    }
+
+    if (tier.toKm == null && index !== normalized.length - 1) {
+      throw new Error("only last tier can have open-ended range");
+    }
+  });
+
+  const last = normalized[normalized.length - 1];
+  if (last.toKm != null) {
+    throw new Error("last tier must be open-ended (toKm = null)");
+  }
+
+  return normalized.map(({ fromKm, toKm, pricePerKm }) => ({ fromKm, toKm, pricePerKm }));
+};
 
 // Get current pricing (latest)
 router.get("/admin/pricing", requireAdmin, async (req, res) => {
@@ -65,6 +125,64 @@ router.put("/admin/pricing", requireAdmin, async (req, res) => {
   } catch (e) {
     console.error(e.message);
     res.status(500).json({ error: e.message });
+  }
+});
+
+// Get pricing tiers per service type
+router.get("/admin/pricing/tiers", requireAdmin, async (req, res) => {
+  try {
+    const { serviceType = "normal" } = req.query;
+    if (!["normal", "vip"].includes(serviceType)) {
+      return res.status(400).json({ error: "invalid serviceType" });
+    }
+
+    const tiers = await PricingTier.findAll({
+      where: { serviceType },
+      order: [["fromKm", "ASC"]],
+    });
+
+    return res.json({ tiers });
+  } catch (e) {
+    console.error(e.message);
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+// Replace pricing tiers for a service type
+router.put("/admin/pricing/tiers", requireAdmin, async (req, res) => {
+  try {
+    const { serviceType, tiers } = req.body;
+    if (!["normal", "vip"].includes(serviceType)) {
+      return res.status(400).json({ error: "invalid serviceType" });
+    }
+
+    let normalized;
+    try {
+      normalized = validateTierPayload(tiers);
+    } catch (err) {
+      return res.status(400).json({ error: "invalid_tiers", message: err.message });
+    }
+
+    const t = await sequelize.transaction();
+    try {
+      await PricingTier.destroy({ where: { serviceType }, transaction: t });
+      const payload = normalized.map((tier) => ({ ...tier, serviceType }));
+      await PricingTier.bulkCreate(payload, { transaction: t });
+      await t.commit();
+    } catch (err) {
+      await t.rollback();
+      throw err;
+    }
+
+    const fresh = await PricingTier.findAll({
+      where: { serviceType },
+      order: [["fromKm", "ASC"]],
+    });
+
+    return res.json({ success: true, tiers: fresh });
+  } catch (e) {
+    console.error(e.message);
+    return res.status(500).json({ error: e.message });
   }
 });
 

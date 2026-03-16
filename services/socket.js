@@ -1,9 +1,10 @@
 const jwt = require("jsonwebtoken");
 const redisService = require("./redis");
-const { User, RideRequest, PricingSetting, SystemSetting, DriverDebtLedger } = require("../models");
+const { User, RideRequest, SystemSetting, DriverDebtLedger } = require("../models");
 const sequelize = require("../config/db");
 const notifications = require("./notifications") || require("../services/notifications");
 const { Op } = require("sequelize");
+const { buildEstimatedFare } = require("./fareCalculator");
 
 let ioInstance = null;
 
@@ -415,64 +416,19 @@ const init = async (io) => {
           const dur = durationMin != null ? parseFloat(durationMin) : null;
 
 
-          const DEFAULT_PRICING = {
-            baseFare: 2000,
-            pricePerKm: 500,
-            pricePerMinute: 0,
-            minimumFare: 3000,
-          };
-
-          try {
-            const pricing = await PricingSetting.findOne({
-              order: [["createdAt", "DESC"]],
-              transaction: t,
-            });
-
-            const base =
-              pricing?.baseFare != null && Number.isFinite(parseFloat(pricing.baseFare))
-                ? parseFloat(pricing.baseFare)
-                : DEFAULT_PRICING.baseFare;
-
-            const perKm =
-              pricing?.pricePerKm != null && Number.isFinite(parseFloat(pricing.pricePerKm))
-                ? parseFloat(pricing.pricePerKm)
-                : DEFAULT_PRICING.pricePerKm;
-
-            const perMin =
-              pricing?.pricePerMinute != null && Number.isFinite(parseFloat(pricing.pricePerMinute))
-                ? parseFloat(pricing.pricePerMinute)
-                : DEFAULT_PRICING.pricePerMinute;
-
-            const minimum =
-              pricing?.minimumFare != null && Number.isFinite(parseFloat(pricing.minimumFare))
-                ? parseFloat(pricing.minimumFare)
-                : DEFAULT_PRICING.minimumFare;
-
-            if (dKm != null) {
-              const beforeMin = base + dKm * perKm + (dur != null ? dur * perMin : 0);
-              const afterMin  = Math.max(minimum, beforeMin);
-
-              const rounded = Math.round(afterMin / 250) * 250;
-
-              estimatedFare = String(rounded);
-            } else {
-              console.log("[FARE CHECK SOCKET] skipped: dKm is null");
+          if (dKm != null) {
+            try {
+              estimatedFare = await buildEstimatedFare({
+                serviceType,
+                distanceKm: dKm,
+                durationMin: dur,
+                transaction: t,
+              });
+            } catch (e) {
+              console.error("pricing calc error:", e.message);
             }
-          } catch (e) {
-            console.error("pricing calc error:", e.message);
-
-            if (dKm != null) {
-              const beforeMin =
-                DEFAULT_PRICING.baseFare +
-                dKm * DEFAULT_PRICING.pricePerKm +
-                (dur != null ? dur * DEFAULT_PRICING.pricePerMinute : 0);
-
-              const afterMin = Math.max(DEFAULT_PRICING.minimumFare, beforeMin);
-
-              const rounded = Math.round(afterMin / 250) * 250;
-
-              estimatedFare = String(rounded);
-            }
+          } else {
+            console.log("[FARE CHECK SOCKET] skipped: dKm is null");
           }
 
           const newReq = await RideRequest.create(

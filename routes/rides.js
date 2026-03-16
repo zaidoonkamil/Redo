@@ -1,14 +1,11 @@
 const express = require("express");
 const router = express.Router();
 const { authenticateToken } = require("../middlewares/auth");
-const { RideRequest, PricingSetting } = require("../models");
+const { RideRequest, User } = require("../models");
 const redisService = require("../services/redis");
 const socketService = require("../services/socket");
 const { Op } = require("sequelize");
-
-function roundUpTo250(amount) {
-  return Math.ceil(amount / 250) * 250;
-}
+const { buildEstimatedFare } = require("../services/fareCalculator");
 
 // إنشاء طلب رحلة جديد (REST)
 router.post("/ride-requests", authenticateToken, async (req, res) => {
@@ -42,81 +39,20 @@ router.post("/ride-requests", authenticateToken, async (req, res) => {
     let estimatedFare = null;
 
     console.log("[CREATE VIA REST] rider=", req.user?.id);
-    console.log("[POST /ride-requests] distanceKm(body):", req.body.distanceKm);
-    console.log("[POST /ride-requests] pickup.distanceKm:", pickup?.distanceKm);
-    console.log("[POST /ride-requests] durationMin(body):", req.body.durationMin);
-    console.log("[POST /ride-requests] pickup.durationMin:", pickup?.durationMin);
     console.log("[POST /ride-requests] parsed dKm:", dKm, "parsed dur:", dur);
 
-    try {
-      const pricing = await PricingSetting.findOne({
-        where: { serviceType },
-        order: [["createdAt", "DESC"]],
-      });
-
-      console.log("[POST /ride-requests] pricing:", {
-        baseFare: pricing?.baseFare,
-        pricePerKm: pricing?.pricePerKm,
-        pricePerMinute: pricing?.pricePerMinute,
-        minimumFare: pricing?.minimumFare,
-      });
-
-      console.log("[REST INPUT]", {
-        bodyDistanceKm: req.body.distanceKm,
-        pickupDistanceKm: pickup?.distanceKm,
-        parsed: dKm,
-      });
-
-      const DEFAULT_PRICING = {
-        normal: {
-          baseFare: 2000,
-          pricePerKm: 500,
-          pricePerMinute: 0,
-          minimumFare: 3000,
-        },
-        vip: {
-          baseFare: 4000,
-          pricePerKm: 1000,
-          pricePerMinute: 0,
-          minimumFare: 5000,
-        },
-      };
-
-      const fallback = DEFAULT_PRICING[serviceType] || DEFAULT_PRICING.normal;
-
-      const base =
-        pricing?.baseFare != null && Number.isFinite(parseFloat(pricing.baseFare))
-          ? parseFloat(pricing.baseFare)
-          : fallback.baseFare;
-
-      const perKm =
-        pricing?.pricePerKm != null && Number.isFinite(parseFloat(pricing.pricePerKm))
-          ? parseFloat(pricing.pricePerKm)
-          : fallback.pricePerKm;
-
-      const perMin =
-        pricing?.pricePerMinute != null && Number.isFinite(parseFloat(pricing.pricePerMinute))
-          ? parseFloat(pricing.pricePerMinute)
-          : fallback.pricePerMinute;
-
-      const minimum =
-        pricing?.minimumFare != null && Number.isFinite(parseFloat(pricing.minimumFare))
-          ? parseFloat(pricing.minimumFare)
-          : fallback.minimumFare;
-
-      if (dKm != null) {
-        const beforeMin = base + dKm * perKm + (dur != null ? dur * perMin : 0);
-        const afterMin = Math.max(minimum, beforeMin);
-
-        const rounded = Math.round(afterMin / 250) * 250;
-
-        estimatedFare = String(rounded);
-
-      } else {
-        console.log("[FARE CHECK REST] skipped: dKm is null");
+    if (dKm != null) {
+      try {
+        estimatedFare = await buildEstimatedFare({
+          serviceType,
+          distanceKm: dKm,
+          durationMin: dur,
+        });
+      } catch (e) {
+        console.error("[POST /ride-requests] fare calc error:", e.message);
       }
-    } catch (e) {
-      console.error("[POST /ride-requests] pricing calc error:", e.message);
+    } else {
+      console.log("[FARE CHECK REST] skipped: dKm is null");
     }
 
     const newReq = await RideRequest.create({
