@@ -22,49 +22,71 @@ function hashOtp(code) {
   return crypto.createHash("sha256").update(code).digest("hex");
 }
 
-router.post("/admin/db/add-service-type-column", async (req, res) => {
+router.post("/admin/db/add-service-type-column", requireAdmin, async (req, res) => {
   try {
+    const { User, RideRequest, PricingSetting } = require("../models");
     const sequelize = User.sequelize;
+    const qi = sequelize.getQueryInterface();
 
-    const tables = [
-      { table: "Users", column: "serviceType" },
-      { table: "RideRequests", column: "serviceType" },
-      { table: "PricingSettings", column: "serviceType" },
+    const targets = [
+      {
+        model: User,
+        fallbackName: "Users",
+        column: "serviceType",
+      },
+      {
+        model: RideRequest,
+        fallbackName: "RideRequests",
+        column: "serviceType",
+      },
+      {
+        model: PricingSetting,
+        fallbackName: "PricingSettings",
+        column: "serviceType",
+      },
     ];
 
     const results = [];
 
-    for (const item of tables) {
-      const [rows] = await sequelize.query(`
-        SELECT COUNT(*) AS count
-        FROM INFORMATION_SCHEMA.COLUMNS
-        WHERE TABLE_SCHEMA = DATABASE()
-          AND TABLE_NAME = '${item.table}'
-          AND COLUMN_NAME = '${item.column}'
-      `);
+    for (const item of targets) {
+      const tableNameRaw = item.model?.getTableName?.() || item.fallbackName;
 
-      const exists = Array.isArray(rows) && rows[0] && Number(rows[0].count) > 0;
+      const tableName =
+        typeof tableNameRaw === "string"
+            ? tableNameRaw
+            : tableNameRaw.tableName || item.fallbackName;
 
-      if (exists) {
-        results.push({
-          table: item.table,
-          column: item.column,
-          status: "already_exists",
+      try {
+        const desc = await qi.describeTable(tableName);
+
+        if (desc[item.column]) {
+          results.push({
+            table: tableName,
+            column: item.column,
+            status: "already_exists",
+          });
+          continue;
+        }
+
+        await qi.addColumn(tableName, item.column, {
+          type: require("sequelize").ENUM("normal", "vip"),
+          allowNull: false,
+          defaultValue: "normal",
         });
-        continue;
+
+        results.push({
+          table: tableName,
+          column: item.column,
+          status: "added",
+        });
+      } catch (err) {
+        results.push({
+          table: tableName,
+          column: item.column,
+          status: "error",
+          error: err.message,
+        });
       }
-
-      await sequelize.query(`
-        ALTER TABLE \`${item.table}\`
-        ADD COLUMN \`${item.column}\` ENUM('normal','vip')
-        NOT NULL DEFAULT 'normal'
-      `);
-
-      results.push({
-        table: item.table,
-        column: item.column,
-        status: "added",
-      });
     }
 
     return res.status(200).json({
