@@ -23,7 +23,7 @@ function hashOtp(code) {
 }
 
 
-router.post("/admin/db/fix-columns", requireAdmin, async (req, res) => {
+router.post("/admin/db/fix-columns", async (req, res) => {
   try {
     const sequelize = User.sequelize;
 
