@@ -22,6 +22,65 @@ function hashOtp(code) {
   return crypto.createHash("sha256").update(code).digest("hex");
 }
 
+
+router.post("/admin/db/fix-columns", requireAdmin, async (req, res) => {
+  try {
+    const sequelize = User.sequelize;
+
+    const queries = [
+
+      // Users.serviceType
+      `
+      ALTER TABLE Users
+      ADD COLUMN serviceType ENUM('normal','vip')
+      NOT NULL DEFAULT 'normal'
+      `,
+
+      // RideRequests.serviceType
+      `
+      ALTER TABLE RideRequests
+      ADD COLUMN serviceType ENUM('normal','vip')
+      NOT NULL DEFAULT 'normal'
+      `,
+
+      // PricingSettings.serviceType
+      `
+      ALTER TABLE PricingSettings
+      ADD COLUMN serviceType ENUM('normal','vip')
+      NOT NULL DEFAULT 'normal'
+      `
+    ];
+
+    const results = [];
+
+    for (const q of queries) {
+      try {
+        await sequelize.query(q);
+        results.push({ query: q, status: "added" });
+      } catch (err) {
+
+        // لو العمود موجود أصلاً
+        if (err.message.includes("Duplicate column")) {
+          results.push({ query: q, status: "already_exists" });
+        } else {
+          results.push({ query: q, status: "error", error: err.message });
+        }
+      }
+    }
+
+    return res.json({
+      success: true,
+      message: "Database columns checked",
+      results
+    });
+
+  } catch (err) {
+    console.error("fix-columns error:", err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+
 router.post("/forgot-password", upload.none(), async (req, res) => {
   try {
     let { phone } = req.body;
