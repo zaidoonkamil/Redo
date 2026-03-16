@@ -10,6 +10,11 @@ const PricingSetting = sequelize.define(
     pricePerMinute: { type: DataTypes.DECIMAL(10, 3), allowNull: true, defaultValue: null },
     minimumFare: { type: DataTypes.DECIMAL(10, 2), allowNull: true, defaultValue: null },
     surgeEnabled: { type: DataTypes.BOOLEAN, allowNull: true, defaultValue: false },
+    serviceType: {
+      type: DataTypes.ENUM("normal", "vip"),
+      allowNull: false,
+      defaultValue: "normal",
+    },
     surgeMultiplier: { type: DataTypes.DECIMAL(4,2), allowNull: true, defaultValue: 1 },
     updatedByAdminId: { type: DataTypes.INTEGER, allowNull: true },
   },

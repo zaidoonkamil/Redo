@@ -23,6 +23,12 @@ const RideRequest = sequelize.define(
       allowNull: false,
       defaultValue: "pending",
     },
+    serviceType: {
+      type: DataTypes.ENUM("normal", "vip"),
+      allowNull: false,
+      defaultValue: "normal",
+    },
+    
     pickupLat: { type: DataTypes.DECIMAL(10, 7), allowNull: false },
     pickupLng: { type: DataTypes.DECIMAL(10, 7), allowNull: false },
     pickupAddress: { type: DataTypes.STRING, allowNull: true },

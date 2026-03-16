@@ -372,13 +372,16 @@ const init = async (io) => {
       socket.on("rider:create_request", async (data, ack) => {
         const t = await sequelize.transaction();
         try {
-          const { pickup, dropoff, distanceKm, durationMin } = data;
+        const { pickup, dropoff, distanceKm, durationMin, serviceType = "normal" } = data;
 
           if (!pickup || !dropoff) {
             await t.rollback();
             return ack && ack({ ok: false, error: "invalid_payload" });
           }
-
+          if (!["normal", "vip"].includes(serviceType)) {
+            await t.rollback();
+            return ack && ack({ ok: false, error: "invalid_service_type" });
+          }
           const active = await RideRequest.findOne({
             where: {
               rider_id: user.id,
@@ -484,6 +487,7 @@ const init = async (io) => {
               distanceKm: dKm,
               durationMin: dur,
               estimatedFare,
+              serviceType,
               status: "pending",
             },
             { transaction: t }
@@ -536,25 +540,32 @@ const init = async (io) => {
             const isDebtBlocked = await redisClient.sIsMember("drivers:debt_blocked", String(did));
             const driverSocketId = await redisClient.get(`socket:driver:${did}`);
 
-            console.log("candidate=", {
-              did,
-              isOnline,
-              busyRideId,
-              isRejected,
-              isDebtBlocked,
-              driverSocketId,
-            });
-
             if (!isOnline) continue;
             if (busyRideId) continue;
             if (isRejected) continue;
             if (isDebtBlocked) continue;
 
+            const driver = await User.findByPk(did, {
+              attributes: ["id", "role", "status", "serviceType"],
+            });
+
+            if (!driver) continue;
+            if (driver.role !== "driver") continue;
+            if (driver.status !== "active") continue;
+
+            const driverType = driver.serviceType || "normal";
+
+            const canReceive =
+              newReq.serviceType === "normal"
+                ? ["normal", "vip"].includes(driverType)
+                : driverType === "vip";
+
+            if (!canReceive) continue;
+
             if (driverSocketId && ioInstance) {
               ioInstance.to(driverSocketId).emit("request:new", { request: newReq });
               sentCount++;
               await redisClient.sAdd(sentKey, String(did));
-              console.log("✅ emitted request:new to driver", did);
             }
           }
 

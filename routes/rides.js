@@ -14,13 +14,15 @@ function roundUpTo250(amount) {
 router.post("/ride-requests", authenticateToken, async (req, res) => {
   try {
     const user = req.user;
-    const { pickup, dropoff } = req.body;
+    const { pickup, dropoff, serviceType = "normal" } = req.body;
 
     if (!pickup || !dropoff) {
       return res.status(400).json({ error: "pickup and dropoff required" });
     }
+    if (!["normal", "vip"].includes(serviceType)) {
+      return res.status(400).json({ error: "serviceType must be normal or vip" });
+    }
 
-    // parse inputs
     const bodyDistance = req.body.distanceKm;
     const bodyDuration = req.body.durationMin;
 
@@ -48,6 +50,7 @@ router.post("/ride-requests", authenticateToken, async (req, res) => {
 
     try {
       const pricing = await PricingSetting.findOne({
+        where: { serviceType },
         order: [["createdAt", "DESC"]],
       });
 
@@ -64,33 +67,42 @@ router.post("/ride-requests", authenticateToken, async (req, res) => {
         parsed: dKm,
       });
 
-      // default fallback (if no pricing record)
       const DEFAULT_PRICING = {
-        baseFare: 2000,
-        pricePerKm: 500,
-        pricePerMinute: 0,
-        minimumFare: 3000,
+        normal: {
+          baseFare: 2000,
+          pricePerKm: 500,
+          pricePerMinute: 0,
+          minimumFare: 3000,
+        },
+        vip: {
+          baseFare: 4000,
+          pricePerKm: 1000,
+          pricePerMinute: 0,
+          minimumFare: 5000,
+        },
       };
+
+      const fallback = DEFAULT_PRICING[serviceType] || DEFAULT_PRICING.normal;
 
       const base =
         pricing?.baseFare != null && Number.isFinite(parseFloat(pricing.baseFare))
           ? parseFloat(pricing.baseFare)
-          : DEFAULT_PRICING.baseFare;
+          : fallback.baseFare;
 
       const perKm =
         pricing?.pricePerKm != null && Number.isFinite(parseFloat(pricing.pricePerKm))
           ? parseFloat(pricing.pricePerKm)
-          : DEFAULT_PRICING.pricePerKm;
+          : fallback.pricePerKm;
 
       const perMin =
         pricing?.pricePerMinute != null && Number.isFinite(parseFloat(pricing.pricePerMinute))
           ? parseFloat(pricing.pricePerMinute)
-          : DEFAULT_PRICING.pricePerMinute;
+          : fallback.pricePerMinute;
 
       const minimum =
         pricing?.minimumFare != null && Number.isFinite(parseFloat(pricing.minimumFare))
           ? parseFloat(pricing.minimumFare)
-          : DEFAULT_PRICING.minimumFare;
+          : fallback.minimumFare;
 
       if (dKm != null) {
         const beforeMin = base + dKm * perKm + (dur != null ? dur * perMin : 0);
@@ -105,7 +117,6 @@ router.post("/ride-requests", authenticateToken, async (req, res) => {
       }
     } catch (e) {
       console.error("[POST /ride-requests] pricing calc error:", e.message);
-      // estimatedFare remains null
     }
 
     const newReq = await RideRequest.create({
@@ -119,10 +130,10 @@ router.post("/ride-requests", authenticateToken, async (req, res) => {
       distanceKm: dKm,
       durationMin: dur,
       estimatedFare,
+      serviceType,
       status: "pending",
     });
 
-    // find nearby drivers
     const redisClient = await redisService.init();
     const radiusMeters = parseInt(req.query.radius, 10) || 5000;
 
@@ -145,6 +156,23 @@ router.post("/ride-requests", authenticateToken, async (req, res) => {
     for (const did of driverIds) {
       const busyRideId = await redisClient.get(`driver:busy:${did}`);
       if (busyRideId) continue;
+
+      const driver = await User.findByPk(did, {
+        attributes: ["id", "role", "status", "serviceType"],
+      });
+
+      if (!driver) continue;
+      if (driver.role !== "driver") continue;
+      if (driver.status !== "active") continue;
+
+      const driverType = driver.serviceType || "normal";
+
+      const canReceive =
+        newReq.serviceType === "normal"
+          ? ["normal", "vip"].includes(driverType)
+          : driverType === "vip";
+
+      if (!canReceive) continue;
 
       await socketService
         .notifyDriverSocket(did, "request:new", { request: newReq })

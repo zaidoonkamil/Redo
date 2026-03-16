@@ -77,7 +77,11 @@ const User = sequelize.define("User",{
       allowNull: true,
       defaultValue: null,
     },
-
+    serviceType: {
+      type: DataTypes.ENUM("normal", "vip"),
+      allowNull: false,
+      defaultValue: "normal",
+    },
     driverDebt: { type: DataTypes.DECIMAL(14,2), allowNull: false, defaultValue: 0 },
     driverDebtLimitOverride: { type: DataTypes.DECIMAL(14,2), allowNull: true, defaultValue: null },
     isDebtBlocked: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },

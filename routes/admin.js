@@ -10,19 +10,48 @@ const notifications = require("../services/notifications");
 // Get current pricing (latest)
 router.get("/admin/pricing", requireAdmin, async (req, res) => {
   try {
-    const pricing = await PricingSetting.findOne({ order: [["createdAt", "DESC"]] });
+    const { serviceType = "normal" } = req.query;
+
+    if (!["normal", "vip"].includes(serviceType)) {
+      return res.status(400).json({ error: "invalid serviceType" });
+    }
+
+    const pricing = await PricingSetting.findOne({
+      where: { serviceType },
+      order: [["createdAt", "DESC"]],
+    });
+
     if (!pricing) return res.json({ pricing: null });
     res.json({ pricing });
-  } catch (e) { console.error(e.message); res.status(500).json({ error: e.message }); }
+  } catch (e) {
+    console.error(e.message);
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // Update pricing (create new record)
 router.put("/admin/pricing", requireAdmin, async (req, res) => {
   try {
-    const { baseFare, pricePerKm, pricePerMinute, minimumFare, surgeEnabled, surgeMultiplier } = req.body;
-    if (baseFare == null || pricePerKm == null) return res.status(400).json({ error: "baseFare and pricePerKm are required" });
+    const {
+      serviceType,
+      baseFare,
+      pricePerKm,
+      pricePerMinute,
+      minimumFare,
+      surgeEnabled,
+      surgeMultiplier
+    } = req.body;
+
+    if (!["normal", "vip"].includes(serviceType)) {
+      return res.status(400).json({ error: "invalid serviceType" });
+    }
+
+    if (baseFare == null || pricePerKm == null) {
+      return res.status(400).json({ error: "baseFare and pricePerKm are required" });
+    }
 
     const newRec = await PricingSetting.create({
+      serviceType,
       baseFare,
       pricePerKm,
       pricePerMinute: pricePerMinute != null ? pricePerMinute : null,
@@ -33,7 +62,10 @@ router.put("/admin/pricing", requireAdmin, async (req, res) => {
     });
 
     res.json({ success: true, pricing: newRec });
-  } catch (e) { console.error(e.message); res.status(500).json({ error: e.message }); }
+  } catch (e) {
+    console.error(e.message);
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // Admin: list ride requests with filters

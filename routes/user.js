@@ -377,6 +377,7 @@ router.post("/drivers/register",
         vehicleNumber,
         location,
         status,
+        serviceType,
       } = req.body;
 
       let { phone } = req.body;
@@ -387,7 +388,13 @@ router.post("/drivers/register",
           error: "status غير صحيح (active | blocked | pending)",
         });
       }
-      
+
+      if (serviceType && !["normal", "vip"].includes(serviceType)) {
+        return res.status(400).json({
+          error: "serviceType غير صحيح (normal | vip)",
+        });
+      }
+
       if (!name || !phone || !password) {
         return res.status(400).json({ error: "جميع الحقول مطلوبة: name, phone, password" });
       }
@@ -438,6 +445,7 @@ router.post("/drivers/register",
         password: hashedPassword,
         role: "driver",
         status: status || "pending",
+        serviceType: serviceType || "normal",
         driverImage: { main: driverImg },
         carImages: { main: carImgs[0], images: carImgs },
         vehicleType,
