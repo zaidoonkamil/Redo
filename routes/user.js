@@ -22,64 +22,64 @@ function hashOtp(code) {
   return crypto.createHash("sha256").update(code).digest("hex");
 }
 
-
-router.post("/admin/db/fix-columns", async (req, res) => {
+router.post("/admin/db/add-service-type-column", async (req, res) => {
   try {
     const sequelize = User.sequelize;
 
-    const queries = [
-
-      // Users.serviceType
-      `
-      ALTER TABLE Users
-      ADD COLUMN serviceType ENUM('normal','vip')
-      NOT NULL DEFAULT 'normal'
-      `,
-
-      // RideRequests.serviceType
-      `
-      ALTER TABLE RideRequests
-      ADD COLUMN serviceType ENUM('normal','vip')
-      NOT NULL DEFAULT 'normal'
-      `,
-
-      // PricingSettings.serviceType
-      `
-      ALTER TABLE PricingSettings
-      ADD COLUMN serviceType ENUM('normal','vip')
-      NOT NULL DEFAULT 'normal'
-      `
+    const tables = [
+      { table: "Users", column: "serviceType" },
+      { table: "RideRequests", column: "serviceType" },
+      { table: "PricingSettings", column: "serviceType" },
     ];
 
     const results = [];
 
-    for (const q of queries) {
-      try {
-        await sequelize.query(q);
-        results.push({ query: q, status: "added" });
-      } catch (err) {
+    for (const item of tables) {
+      const [rows] = await sequelize.query(`
+        SELECT COUNT(*) AS count
+        FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = '${item.table}'
+          AND COLUMN_NAME = '${item.column}'
+      `);
 
-        // لو العمود موجود أصلاً
-        if (err.message.includes("Duplicate column")) {
-          results.push({ query: q, status: "already_exists" });
-        } else {
-          results.push({ query: q, status: "error", error: err.message });
-        }
+      const exists = Array.isArray(rows) && rows[0] && Number(rows[0].count) > 0;
+
+      if (exists) {
+        results.push({
+          table: item.table,
+          column: item.column,
+          status: "already_exists",
+        });
+        continue;
       }
+
+      await sequelize.query(`
+        ALTER TABLE \`${item.table}\`
+        ADD COLUMN \`${item.column}\` ENUM('normal','vip')
+        NOT NULL DEFAULT 'normal'
+      `);
+
+      results.push({
+        table: item.table,
+        column: item.column,
+        status: "added",
+      });
     }
 
-    return res.json({
+    return res.status(200).json({
       success: true,
-      message: "Database columns checked",
-      results
+      message: "serviceType columns checked successfully",
+      results,
     });
-
   } catch (err) {
-    console.error("fix-columns error:", err);
-    return res.status(500).json({ error: err.message });
+    console.error("add-service-type-column error:", err);
+    return res.status(500).json({
+      success: false,
+      error: err.message,
+    });
   }
 });
-
 
 router.post("/forgot-password", upload.none(), async (req, res) => {
   try {
