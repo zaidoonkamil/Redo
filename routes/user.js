@@ -3,9 +3,7 @@ const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
 const multer = require("multer");
 const { Op } = require("sequelize");
-const { User, UserDevice, OtpCode, PasswordResetOtp, WalletTransaction } = require("../models");
-const sequelize = require("../config/db");
-const { authenticateToken } = require("../middlewares/auth");
+const { User, UserDevice, OtpCode, PasswordResetOtp } = require("../models");
 const uploadImage = require("../middlewares/uploads");
 const router = express.Router();
 const upload = multer();
@@ -289,66 +287,31 @@ const generateToken = (user) => {
   );
 };
 
+const requireAdmin = async (req, res, next) => {
+  try {
+    const token = req.headers.authorization;
+    if (!token) return res.status(401).json({ error: "Token is missing" });
+
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+
+    const admin = await User.findByPk(decoded.id);
+    if (!admin) return res.status(401).json({ error: "User not found" });
+
+    if (admin.role !== "admin") {
+      return res.status(403).json({ error: "Not allowed" });
+    }
+
+    req.user = admin;
+    next();
+  } catch (err) {
+    return res.status(401).json({ error: "Invalid token" });
+  }
+};
+
 const safeUser = (user) => {
   const u = user.toJSON();
   delete u.password;
   return u;
-};
-
-const parsePositiveAmount = (value) => {
-  const amount = Number(value);
-  if (!Number.isFinite(amount) || amount <= 0) return null;
-  return Number(amount.toFixed(2));
-};
-
-const applyWalletChange = async ({ userId, type, amount, createdBy, note, reference, metadata }) => {
-  return sequelize.transaction(async (t) => {
-    const user = await User.findByPk(userId, {
-      transaction: t,
-      lock: t.LOCK.UPDATE,
-    });
-
-    if (!user) {
-      throw new Error("USER_NOT_FOUND");
-    }
-
-    const before = Number(user.walletBalance || 0);
-    let after = before;
-
-    if (type === "credit") {
-      after = before + amount;
-    } else if (type === "debit") {
-      if (before < amount) {
-        throw new Error("INSUFFICIENT_BALANCE");
-      }
-      after = before - amount;
-    } else {
-      throw new Error("INVALID_WALLET_TYPE");
-    }
-
-    user.walletBalance = Number(after.toFixed(2));
-    await user.save({ transaction: t });
-
-    const movement = await WalletTransaction.create(
-      {
-        user_id: user.id,
-        type,
-        amount,
-        balance_before: Number(before.toFixed(2)),
-        balance_after: Number(after.toFixed(2)),
-        note: note || null,
-        reference: reference || null,
-        metadata: metadata || null,
-        created_by: createdBy || null,
-      },
-      { transaction: t }
-    );
-
-    return {
-      user,
-      movement,
-    };
-  });
 };
 
 router.post("/users", upload.none(), async (req, res) => {
@@ -727,7 +690,7 @@ router.delete("/users/:id", async (req, res) => {
   }
 });
 
-router.get("/drivers/pending", async (req, res) => {
+router.get("/drivers/pending", requireAdmin, async (req, res) => {
   try {
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 30;
@@ -756,7 +719,7 @@ router.get("/drivers/pending", async (req, res) => {
   }
 });
 
-router.patch("/drivers/:id/activate", async (req, res) => {
+router.patch("/drivers/:id/activate", requireAdmin, async (req, res) => {
   try {
     const driverId = Number(req.params.id);
 
@@ -784,7 +747,7 @@ router.patch("/drivers/:id/activate", async (req, res) => {
   }
 });
 
-router.patch("/users/:id/status", upload.none(), async (req, res) => {
+router.patch("/users/:id/status", requireAdmin, upload.none(), async (req, res) => {
   try {
     const userId = Number(req.params.id);
     const { status } = req.body;
@@ -811,144 +774,6 @@ router.patch("/users/:id/status", upload.none(), async (req, res) => {
   }
 });
 
-// يعرض رصيد المحفظة الحالي للمستخدم
-router.get("/wallet", authenticateToken, async (req, res) => {
-  try {
-    const user = await User.findByPk(req.user.id, {
-      attributes: ["id", "name", "phone", "walletBalance"],
-    });
-
-    if (!user) return res.status(404).json({ error: "المستخدم غير موجود" });
-
-    return res.status(200).json({
-      wallet: {
-        userId: user.id,
-        balance: Number(user.walletBalance || 0),
-      },
-    });
-  } catch (err) {
-    console.error("❌ Error fetching wallet:", err);
-    return res.status(500).json({ error: "Internal Server Error" });
-  }
-});
-
-// يعرض سجل حركات المحفظة للمستخدم
-router.get("/wallet/transactions", authenticateToken, async (req, res) => {
-  try {
-    const page = Math.max(parseInt(req.query.page || "1", 10), 1);
-    const limit = Math.min(Math.max(parseInt(req.query.limit || "20", 10), 1), 100);
-    const offset = (page - 1) * limit;
-
-    const { count, rows } = await WalletTransaction.findAndCountAll({
-      where: { user_id: req.user.id },
-      order: [["createdAt", "DESC"]],
-      limit,
-      offset,
-    });
-
-    return res.status(200).json({
-      transactions: rows,
-      pagination: {
-        total: count,
-        page,
-        totalPages: Math.ceil(count / limit),
-        limit,
-      },
-    });
-  } catch (err) {
-    console.error("❌ Error fetching wallet transactions:", err);
-    return res.status(500).json({ error: "Internal Server Error" });
-  }
-});
-
-// شحن المحفظة للمستخدم (للاستخدام من قبل الأدمن)
-router.post("/admin/wallet/topup", upload.none(), async (req, res) => {
-  try {
-    const userId = Number(req.body.userId);
-    const amount = parsePositiveAmount(req.body.amount);
-    const note = String(req.body.note || "").trim();
-    const reference = String(req.body.reference || "").trim();
-
-    if (!Number.isInteger(userId) || userId <= 0) {
-      return res.status(400).json({ error: "userId غير صحيح" });
-    }
-
-    if (!amount) {
-      return res.status(400).json({ error: "amount يجب أن يكون رقمًا أكبر من 0" });
-    }
-
-    const { user, movement } = await applyWalletChange({
-      userId,
-      type: "credit",
-      amount,
-      createdBy: req.user.id,
-      note,
-      reference,
-      metadata: { source: "admin_topup" },
-    });
-
-    return res.status(200).json({
-      message: "تم شحن المحفظة بنجاح",
-      wallet: {
-        userId: user.id,
-        balance: Number(user.walletBalance || 0),
-      },
-      transaction: movement,
-    });
-  } catch (err) {
-    if (err.message === "USER_NOT_FOUND") {
-      return res.status(404).json({ error: "المستخدم غير موجود" });
-    }
-    console.error("❌ Error topping up wallet:", err);
-    return res.status(500).json({ error: "Internal Server Error" });
-  }
-});
-
-// خصم رصيد من المحفظة للمستخدم (للاستخدام من قبل الأدمن)
-router.post("/admin/wallet/deduct", upload.none(), async (req, res) => {
-  try {
-    const userId = Number(req.body.userId);
-    const amount = parsePositiveAmount(req.body.amount);
-    const note = String(req.body.note || "").trim();
-    const reference = String(req.body.reference || "").trim();
-
-    if (!Number.isInteger(userId) || userId <= 0) {
-      return res.status(400).json({ error: "userId غير صحيح" });
-    }
-
-    if (!amount) {
-      return res.status(400).json({ error: "amount يجب أن يكون رقمًا أكبر من 0" });
-    }
-
-    const { user, movement } = await applyWalletChange({
-      userId,
-      type: "debit",
-      amount,
-      createdBy: req.user.id,
-      note,
-      reference,
-      metadata: { source: "admin_deduct" },
-    });
-
-    return res.status(200).json({
-      message: "تم خصم الرصيد من المحفظة بنجاح",
-      wallet: {
-        userId: user.id,
-        balance: Number(user.walletBalance || 0),
-      },
-      transaction: movement,
-    });
-  } catch (err) {
-    if (err.message === "USER_NOT_FOUND") {
-      return res.status(404).json({ error: "المستخدم غير موجود" });
-    }
-    if (err.message === "INSUFFICIENT_BALANCE") {
-      return res.status(400).json({ error: "رصيد المحفظة غير كافٍ" });
-    }
-    console.error("❌ Error deducting wallet:", err);
-    return res.status(500).json({ error: "Internal Server Error" });
-  }
-});
-
 
 module.exports = router;
+module.exports.requireAdmin = requireAdmin;
