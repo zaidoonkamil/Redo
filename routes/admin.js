@@ -1,6 +1,5 @@
 const express = require("express");
 const router = express.Router();
-const { requireAdmin } = require("./user");
 const { PricingSetting, PricingTier, RideRequest, User } = require("../models");
 const { Op } = require("sequelize");
 const redisService = require("../services/redis");
@@ -68,7 +67,7 @@ const validateTierPayload = (tiers) => {
 };
 
 // Get current pricing (latest)
-router.get("/admin/pricing", requireAdmin, async (req, res) => {
+router.get("/admin/pricing", async (req, res) => {
   try {
     const { serviceType = "normal" } = req.query;
 
@@ -90,7 +89,7 @@ router.get("/admin/pricing", requireAdmin, async (req, res) => {
 });
 
 // Update pricing (create new record)
-router.put("/admin/pricing", requireAdmin, async (req, res) => {
+router.put("/admin/pricing", async (req, res) => {
   try {
     const {
       serviceType,
@@ -129,7 +128,7 @@ router.put("/admin/pricing", requireAdmin, async (req, res) => {
 });
 
 // Get pricing tiers per service type
-router.get("/admin/pricing/tiers", requireAdmin, async (req, res) => {
+router.get("/admin/pricing/tiers", async (req, res) => {
   try {
     const { serviceType = "normal" } = req.query;
     if (!["normal", "vip"].includes(serviceType)) {
@@ -149,7 +148,7 @@ router.get("/admin/pricing/tiers", requireAdmin, async (req, res) => {
 });
 
 // Replace pricing tiers for a service type
-router.put("/admin/pricing/tiers", requireAdmin, async (req, res) => {
+router.put("/admin/pricing/tiers", async (req, res) => {
   try {
     const { serviceType, tiers } = req.body;
     if (!["normal", "vip"].includes(serviceType)) {
@@ -187,7 +186,7 @@ router.put("/admin/pricing/tiers", requireAdmin, async (req, res) => {
 });
 
 // Admin: list ride requests with filters
-router.get("/admin/ride-requests", requireAdmin, async (req, res) => {
+router.get("/admin/ride-requests", async (req, res) => {
   try {
     const { status, page = 1, limit = 30, from, to, rider_id, driver_id } = req.query;
     const where = {};
@@ -205,7 +204,7 @@ router.get("/admin/ride-requests", requireAdmin, async (req, res) => {
 });
 
 // Admin: get ride details
-router.get("/admin/ride-requests/:id", requireAdmin, async (req, res) => {
+router.get("/admin/ride-requests/:id", async (req, res) => {
   try {
     const ride = await RideRequest.findByPk(req.params.id, { include: [
       { model: User, as: "rider", attributes: { exclude: ["password"] } },
@@ -217,7 +216,7 @@ router.get("/admin/ride-requests/:id", requireAdmin, async (req, res) => {
 });
 
 // Admin: change status with validations
-router.patch("/admin/ride-requests/:id/status", requireAdmin, async (req, res) => {
+router.patch("/admin/ride-requests/:id/status", async (req, res) => {
   try {
     const { status } = req.body;
     if (!status) return res.status(400).json({ error: "status required" });
@@ -246,7 +245,7 @@ router.patch("/admin/ride-requests/:id/status", requireAdmin, async (req, res) =
 });
 
 // Admin: assign driver to pending ride
-router.post("/admin/ride-requests/:id/assign-driver", requireAdmin, async (req, res) => {
+router.post("/admin/ride-requests/:id/assign-driver", async (req, res) => {
   const t = await RideRequest.sequelize.transaction();
   try {
     const { driverId } = req.body;
@@ -274,7 +273,7 @@ router.post("/admin/ride-requests/:id/assign-driver", requireAdmin, async (req, 
 });
 
 // Admin: online drivers (lightweight)
-router.get("/admin/drivers/online", requireAdmin, async (req, res) => {
+router.get("/admin/drivers/online", async (req, res) => {
   try {
     const redis = await redisService.init();
     const ids = await redis.sMembers("drivers:online").catch(() => []);
@@ -290,7 +289,7 @@ router.get("/admin/drivers/online", requireAdmin, async (req, res) => {
 });
 
 // Admin: simple stats
-router.get("/admin/stats/summary", requireAdmin, async (req, res) => {
+router.get("/admin/stats/summary", async (req, res) => {
   try {
     const usersCount = await User.count({ where: { role: { [Op.not]: "admin" } } });
     const driversCount = await User.count({ where: { role: "driver" } });
