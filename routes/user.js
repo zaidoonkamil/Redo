@@ -719,6 +719,33 @@ router.get("/drivers/pending", requireAdmin, async (req, res) => {
   }
 });
 
+
+router.post("/admin/fix-wallet-column", async (req, res) => {
+  try {
+    const sequelize = require("../config/db");
+
+    await sequelize.query(`
+      ALTER TABLE Users
+      ADD COLUMN walletBalance DECIMAL(10,2) NOT NULL DEFAULT 0.00;
+    `);
+
+    return res.status(200).json({
+      message: "تم إضافة العمود walletBalance بنجاح",
+    });
+  } catch (err) {
+    console.error("❌ Error adding column:", err);
+
+    // إذا العمود موجود مسبقًا
+    if (err.original && err.original.code === "ER_DUP_FIELDNAME") {
+      return res.status(200).json({
+        message: "العمود موجود مسبقًا",
+      });
+    }
+
+    return res.status(500).json({ error: "Internal Server Error" });
+  }
+});
+
 router.patch("/drivers/:id/activate", requireAdmin, async (req, res) => {
   try {
     const driverId = Number(req.params.id);
