@@ -82,6 +82,11 @@ const User = sequelize.define("User",{
       allowNull: false,
       defaultValue: "normal",
     },
+    walletBalance: {
+      type: DataTypes.DECIMAL(14, 2),
+      allowNull: false,
+      defaultValue: 0,
+    },
     driverDebt: { type: DataTypes.DECIMAL(14,2), allowNull: false, defaultValue: 0 },
     driverDebtLimitOverride: { type: DataTypes.DECIMAL(14,2), allowNull: true, defaultValue: null },
     isDebtBlocked: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },

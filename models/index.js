@@ -9,6 +9,7 @@ const DriverDebtLedger = require("./driver_debt_ledger");
 const ChatMessage = require("./ChatMessage");
 const OtpCode = require("./OtpCode");
 const PasswordResetOtp = require("./PasswordResetOtp");
+const WalletTransaction = require("./wallet_transaction");
 const pricingTier = require("./pricing_tier");
 
 User.hasMany(UserDevice, { foreignKey: "user_id", as: "devices", onDelete: "CASCADE" });
@@ -32,6 +33,9 @@ ChatMessage.belongsTo(User, { as: "receiver", foreignKey: "receiverId" , onDelet
 User.hasMany(ChatMessage, { as: "sentMessages", foreignKey: "senderId" , onDelete: 'CASCADE' });
 User.hasMany(ChatMessage, { as: "receivedMessages", foreignKey: "receiverId" , onDelete: 'CASCADE'});
 
+User.hasMany(WalletTransaction, { foreignKey: "user_id", as: "walletTransactions", onDelete: "CASCADE" });
+WalletTransaction.belongsTo(User, { foreignKey: "user_id", as: "user" });
+
 
 module.exports = {
   User,
@@ -46,4 +50,5 @@ module.exports = {
   OtpCode,
   pricingTier,
   PasswordResetOtp,
+  WalletTransaction,
 };
