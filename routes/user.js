@@ -973,3 +973,4 @@ router.post("/admin/wallet/deduct", requireAdmin, upload.none(), async (req, res
 
 
 module.exports = router;
+module.exports.requireAdmin = requireAdmin;
