@@ -289,27 +289,6 @@ const generateToken = (user) => {
   );
 };
 
-const requireAdmin = async (req, res, next) => {
-  try {
-    const token = req.headers.authorization;
-    if (!token) return res.status(401).json({ error: "Token is missing" });
-
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
-
-    const admin = await User.findByPk(decoded.id);
-    if (!admin) return res.status(401).json({ error: "User not found" });
-
-    if (admin.role !== "admin") {
-      return res.status(403).json({ error: "Not allowed" });
-    }
-
-    req.user = admin;
-    next();
-  } catch (err) {
-    return res.status(401).json({ error: "Invalid token" });
-  }
-};
-
 const safeUser = (user) => {
   const u = user.toJSON();
   delete u.password;
@@ -748,7 +727,7 @@ router.delete("/users/:id", async (req, res) => {
   }
 });
 
-router.get("/drivers/pending", requireAdmin, async (req, res) => {
+router.get("/drivers/pending", upload.none(), async (req, res) => {
   try {
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 30;
@@ -777,7 +756,7 @@ router.get("/drivers/pending", requireAdmin, async (req, res) => {
   }
 });
 
-router.patch("/drivers/:id/activate", requireAdmin, async (req, res) => {
+router.patch("/drivers/:id/activate", upload.none(), async (req, res) => {
   try {
     const driverId = Number(req.params.id);
 
@@ -805,7 +784,7 @@ router.patch("/drivers/:id/activate", requireAdmin, async (req, res) => {
   }
 });
 
-router.patch("/users/:id/status", requireAdmin, upload.none(), async (req, res) => {
+router.patch("/users/:id/status", upload.none(), async (req, res) => {
   try {
     const userId = Number(req.params.id);
     const { status } = req.body;
@@ -883,7 +862,7 @@ router.get("/wallet/transactions", authenticateToken, async (req, res) => {
 });
 
 // شحن المحفظة للمستخدم (للاستخدام من قبل الأدمن)
-router.post("/admin/wallet/topup", requireAdmin, upload.none(), async (req, res) => {
+router.post("/admin/wallet/topup", upload.none(), async (req, res) => {
   try {
     const userId = Number(req.body.userId);
     const amount = parsePositiveAmount(req.body.amount);
@@ -926,7 +905,7 @@ router.post("/admin/wallet/topup", requireAdmin, upload.none(), async (req, res)
 });
 
 // خصم رصيد من المحفظة للمستخدم (للاستخدام من قبل الأدمن)
-router.post("/admin/wallet/deduct", requireAdmin, upload.none(), async (req, res) => {
+router.post("/admin/wallet/deduct", upload.none(), async (req, res) => {
   try {
     const userId = Number(req.body.userId);
     const amount = parsePositiveAmount(req.body.amount);
@@ -973,4 +952,3 @@ router.post("/admin/wallet/deduct", requireAdmin, upload.none(), async (req, res
 
 
 module.exports = router;
-module.exports.requireAdmin = requireAdmin;
