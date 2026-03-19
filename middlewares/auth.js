@@ -1,7 +1,8 @@
 const jwt = require("jsonwebtoken");
+const { User } = require("../models");
 
 const authenticateToken = (req, res, next) => {
-  const header = req.headers.authorization; // "Bearer xxx"
+  const header = req.headers.authorization;
   const token = header?.startsWith("Bearer ")
     ? header.slice(7).trim()
     : header?.trim();
