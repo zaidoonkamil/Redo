@@ -10,6 +10,8 @@ const upload = multer();
 const saltRounds = 10;
 const crypto = require("crypto");
 const { sendWhatsAppText } = require("../services/waSender");
+const { requireAdmin } = require("../middlewares/auth.js");
+
 
 function generateOtp() {
   return String(Math.floor(100000 + Math.random() * 900000));
@@ -287,26 +289,6 @@ const generateToken = (user) => {
   );
 };
 
-const requireAdmin = async (req, res, next) => {
-  try {
-    const token = req.headers.authorization;
-    if (!token) return res.status(401).json({ error: "Token is missing" });
-
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
-
-    const admin = await User.findByPk(decoded.id);
-    if (!admin) return res.status(401).json({ error: "User not found" });
-
-    if (admin.role !== "admin") {
-      return res.status(403).json({ error: "Not allowed" });
-    }
-
-    req.user = admin;
-    next();
-  } catch (err) {
-    return res.status(401).json({ error: "Invalid token" });
-  }
-};
 
 const safeUser = (user) => {
   const u = user.toJSON();
@@ -719,32 +701,6 @@ router.get("/drivers/pending", requireAdmin, async (req, res) => {
   }
 });
 
-
-router.post("/admin/fix-wallet-column", async (req, res) => {
-  try {
-    const sequelize = require("../config/db");
-
-    await sequelize.query(`
-      ALTER TABLE Users
-      ADD COLUMN walletBalance DECIMAL(10,2) NOT NULL DEFAULT 0.00;
-    `);
-
-    return res.status(200).json({
-      message: "تم إضافة العمود walletBalance بنجاح",
-    });
-  } catch (err) {
-    console.error("❌ Error adding column:", err);
-
-    // إذا العمود موجود مسبقًا
-    if (err.original && err.original.code === "ER_DUP_FIELDNAME") {
-      return res.status(200).json({
-        message: "العمود موجود مسبقًا",
-      });
-    }
-
-    return res.status(500).json({ error: "Internal Server Error" });
-  }
-});
 
 router.patch("/drivers/:id/activate", requireAdmin, async (req, res) => {
   try {
