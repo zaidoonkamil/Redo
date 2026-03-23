@@ -1,12 +1,45 @@
 const express = require("express");
 const router = express.Router();
 const { requireAdmin } = require("./user");
-const { PricingSetting, PricingTier, RideRequest, User } = require("../models");
+const { PricingSetting, PricingTier, RideRequest, User, WalletTransaction } = require("../models");
 const { Op } = require("sequelize");
 const redisService = require("../services/redis");
 const socketService = require("../services/socket");
 const notifications = require("../services/notifications");
 const sequelize = require("../config/db");
+
+// ─── Wallet helpers (mirrored from user.js) ────────────────────────────────
+const parseAmountToCents = (value) => {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  const cents = Math.round(n * 100);
+  return cents > 0 ? cents : null;
+};
+const centsToDecimal = (cents) => (cents / 100).toFixed(2);
+
+const applyWalletTx = async ({ userId, type, amountCents, reference, note, metadata, createdBy }) => {
+  if (!["credit", "debit"].includes(type)) throw new Error("invalid_wallet_transaction_type");
+  return sequelize.transaction(async (t) => {
+    const user = await User.findByPk(userId, { transaction: t, lock: t.LOCK.UPDATE });
+    if (!user) { const e = new Error("wallet_user_not_found"); e.code = "wallet_user_not_found"; throw e; }
+    const beforeCents = Math.round(Number(user.walletBalance || 0) * 100);
+    const afterCents = beforeCents + (type === "credit" ? amountCents : -amountCents);
+    if (afterCents < 0) { const e = new Error("wallet_insufficient_balance"); e.code = "wallet_insufficient_balance"; throw e; }
+    user.walletBalance = centsToDecimal(afterCents);
+    await user.save({ transaction: t });
+    const tx = await WalletTransaction.create({
+      user_id: user.id, type,
+      amount: centsToDecimal(amountCents),
+      balance_before: centsToDecimal(beforeCents),
+      balance_after: centsToDecimal(afterCents),
+      reference: reference || null,
+      note: note || null,
+      metadata: metadata || null,
+      created_by: createdBy || null,
+    }, { transaction: t });
+    return { user, tx };
+  });
+};
 
 const TIER_EPSILON = 1e-4;
 
@@ -301,6 +334,182 @@ router.get("/admin/stats/summary", requireAdmin, async (req, res) => {
     const completed = await RideRequest.count({ where: { status: "completed" } });
     res.json({ users: usersCount, drivers: driversCount, ridesToday, pending, completed });
   } catch (e) { console.error(e.message); res.status(500).json({ error: e.message }); }
+});
+
+// ─── Admin Wallet Management ────────────────────────────────────────────────
+
+// GET /admin/users/:id/wallet
+// عرض رصيد المحفظة لمستخدم معين (أدمن فقط)
+router.get("/admin/users/:id/wallet", requireAdmin, async (req, res) => {
+  try {
+    const userId = Number(req.params.id);
+    if (!Number.isInteger(userId) || userId <= 0) {
+      return res.status(400).json({ error: "معرّف المستخدم غير صحيح" });
+    }
+
+    const user = await User.findByPk(userId, {
+      attributes: ["id", "name", "phone", "role", "walletBalance"],
+    });
+    if (!user) return res.status(404).json({ error: "المستخدم غير موجود" });
+
+    return res.status(200).json({
+      wallet: {
+        userId: user.id,
+        name: user.name,
+        phone: user.phone,
+        role: user.role,
+        balance: Number(user.walletBalance || 0),
+      },
+    });
+  } catch (err) {
+    console.error("❌ Error fetching user wallet:", err);
+    return res.status(500).json({ error: "Internal Server Error" });
+  }
+});
+
+// GET /admin/users/:id/wallet/transactions
+// عرض سجل معاملات المحفظة لمستخدم معين (أدمن فقط)
+router.get("/admin/users/:id/wallet/transactions", requireAdmin, async (req, res) => {
+  try {
+    const userId = Number(req.params.id);
+    if (!Number.isInteger(userId) || userId <= 0) {
+      return res.status(400).json({ error: "معرّف المستخدم غير صحيح" });
+    }
+
+    const user = await User.findByPk(userId, {
+      attributes: ["id", "name", "phone", "role", "walletBalance"],
+    });
+    if (!user) return res.status(404).json({ error: "المستخدم غير موجود" });
+
+    const page = Math.max(parseInt(req.query.page || "1", 10), 1);
+    const limit = Math.min(Math.max(parseInt(req.query.limit || "20", 10), 1), 100);
+    const offset = (page - 1) * limit;
+    const type = req.query.type;
+
+    const where = { user_id: userId };
+    if (type) {
+      if (!["credit", "debit"].includes(type)) {
+        return res.status(400).json({ error: "type غير صحيح (credit | debit)" });
+      }
+      where.type = type;
+    }
+
+    const { count, rows } = await WalletTransaction.findAndCountAll({
+      where,
+      limit,
+      offset,
+      order: [["createdAt", "DESC"]],
+    });
+
+    return res.status(200).json({
+      wallet: {
+        userId: user.id,
+        name: user.name,
+        balance: Number(user.walletBalance || 0),
+      },
+      transactions: rows,
+      pagination: {
+        total: count,
+        currentPage: page,
+        totalPages: Math.ceil(count / limit),
+        limit,
+      },
+    });
+  } catch (err) {
+    console.error("❌ Error fetching wallet transactions:", err);
+    return res.status(500).json({ error: "Internal Server Error" });
+  }
+});
+
+// POST /admin/users/:id/wallet/credit
+// شحن محفظة مستخدم (أدمن فقط)
+router.post("/admin/users/:id/wallet/credit", requireAdmin, async (req, res) => {
+  try {
+    const userId = Number(req.params.id);
+    if (!Number.isInteger(userId) || userId <= 0) {
+      return res.status(400).json({ error: "معرّف المستخدم غير صحيح" });
+    }
+
+    const amountCents = parseAmountToCents(req.body.amount);
+    if (!amountCents) {
+      return res.status(400).json({ error: "amount يجب أن يكون أكبر من 0" });
+    }
+
+    const { reference, note } = req.body;
+
+    const { user, tx } = await applyWalletTx({
+      userId,
+      type: "credit",
+      amountCents,
+      reference,
+      note,
+      metadata: { source: "admin_credit", adminId: req.user.id },
+      createdBy: req.user.id,
+    });
+
+    return res.status(200).json({
+      message: "تم شحن المحفظة بنجاح",
+      wallet: {
+        userId: user.id,
+        name: user.name,
+        balance: Number(user.walletBalance || 0),
+      },
+      transaction: tx,
+    });
+  } catch (err) {
+    if (err.code === "wallet_user_not_found") {
+      return res.status(404).json({ error: "المستخدم غير موجود" });
+    }
+    console.error("❌ Error crediting wallet:", err);
+    return res.status(500).json({ error: "Internal Server Error" });
+  }
+});
+
+// POST /admin/users/:id/wallet/debit
+// خصم من محفظة مستخدم (أدمن فقط)
+router.post("/admin/users/:id/wallet/debit", requireAdmin, async (req, res) => {
+  try {
+    const userId = Number(req.params.id);
+    if (!Number.isInteger(userId) || userId <= 0) {
+      return res.status(400).json({ error: "معرّف المستخدم غير صحيح" });
+    }
+
+    const amountCents = parseAmountToCents(req.body.amount);
+    if (!amountCents) {
+      return res.status(400).json({ error: "amount يجب أن يكون أكبر من 0" });
+    }
+
+    const { reference, note } = req.body;
+
+    const { user, tx } = await applyWalletTx({
+      userId,
+      type: "debit",
+      amountCents,
+      reference,
+      note,
+      metadata: { source: "admin_debit", adminId: req.user.id },
+      createdBy: req.user.id,
+    });
+
+    return res.status(200).json({
+      message: "تم خصم الرصيد بنجاح",
+      wallet: {
+        userId: user.id,
+        name: user.name,
+        balance: Number(user.walletBalance || 0),
+      },
+      transaction: tx,
+    });
+  } catch (err) {
+    if (err.code === "wallet_user_not_found") {
+      return res.status(404).json({ error: "المستخدم غير موجود" });
+    }
+    if (err.code === "wallet_insufficient_balance") {
+      return res.status(400).json({ error: "الرصيد غير كافٍ لإجراء الخصم" });
+    }
+    console.error("❌ Error debiting wallet:", err);
+    return res.status(500).json({ error: "Internal Server Error" });
+  }
 });
 
 module.exports = router;

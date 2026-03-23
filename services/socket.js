@@ -1,10 +1,42 @@
 const jwt = require("jsonwebtoken");
 const redisService = require("./redis");
-const { User, RideRequest, SystemSetting, DriverDebtLedger } = require("../models");
+const { User, RideRequest, SystemSetting, WalletTransaction } = require("../models");
 const sequelize = require("../config/db");
 const notifications = require("./notifications") || require("../services/notifications");
 const { Op } = require("sequelize");
 const { buildEstimatedFare } = require("./fareCalculator");
+
+// ─── Wallet helpers ───────────────────────────────────────────────────────────
+const centsToDecimal = (cents) => (cents / 100).toFixed(2);
+
+const applyDriverWalletTx = async ({ userId, type, amountCents, note, metadata, rideRequestId }) => {
+  return sequelize.transaction(async (t) => {
+    const driver = await User.findByPk(userId, { transaction: t, lock: t.LOCK.UPDATE });
+    if (!driver) throw Object.assign(new Error("driver_not_found"), { code: "driver_not_found" });
+
+    const beforeCents = Math.round(Number(driver.walletBalance || 0) * 100);
+    const afterCents = beforeCents + (type === "credit" ? amountCents : -amountCents);
+
+    if (afterCents < 0) throw Object.assign(new Error("wallet_insufficient_balance"), { code: "wallet_insufficient_balance" });
+
+    driver.walletBalance = centsToDecimal(afterCents);
+    await driver.save({ transaction: t });
+
+    await WalletTransaction.create({
+      user_id: driver.id,
+      type,
+      amount: centsToDecimal(amountCents),
+      balance_before: centsToDecimal(beforeCents),
+      balance_after: centsToDecimal(afterCents),
+      reference: rideRequestId ? `ride:${rideRequestId}` : null,
+      note: note || null,
+      metadata: metadata || null,
+      created_by: null,
+    }, { transaction: t });
+
+    return { driver, balanceAfter: Number(driver.walletBalance) };
+  });
+};
 
 let ioInstance = null;
 
@@ -92,15 +124,21 @@ const init = async (io) => {
       // اتصال السائق
       socket.on("driver:online", async () => {
         try {
-          const isDebtBlocked = await redisClient.sIsMember("drivers:debt_blocked", String(user.id));
-          if (isDebtBlocked) {
-            socket.emit("driver:debt_blocked", { ok: false, reason: "debt_blocked" });
+          // فحص رصيد المحفظة - السائق يجب أن يكون رصيده > 0 ليتمكن من العمل
+          const driver = await User.findByPk(user.id, { attributes: ["id", "walletBalance", "isDebtBlocked"] });
+          if (!driver) return;
+
+          const balance = Number(driver.walletBalance || 0);
+          if (balance <= 0) {
+            socket.emit("driver:wallet_blocked", { ok: false, reason: "wallet_empty", balance });
             return;
           }
+
           await redisClient.set(`driver:state:${user.id}`, "online", { EX: 3600 });
           await redisClient.sAdd("drivers:online", String(user.id));
           await redisClient.set(socketKey, socket.id, { EX: 3600 });
-          console.log("🟢 driver online:", user.id);
+          socket.emit("driver:online_ack", { ok: true, balance });
+          console.log("🟢 driver online:", user.id, "| balance:", balance);
         } catch (e) {
           console.error("driver:online error", e.message);
         }
@@ -175,9 +213,14 @@ const init = async (io) => {
       // قبول طلب الرحلة من قبل السائق
       socket.on("driver:accept_request", async ({ requestId }) => {
         try {
-          const driver = await User.findByPk(user.id);
-          if (driver && (driver.isDebtBlocked || driver.status === "blocked" || driver.blockReason === "debt")) {
-            socket.emit("request:accept_failed", { reason: "debt_blocked" });
+          const driver = await User.findByPk(user.id, { attributes: ["id", "status", "walletBalance"] });
+          if (!driver || driver.status === "blocked") {
+            socket.emit("request:accept_failed", { reason: "driver_blocked" });
+            return;
+          }
+          // فحص الرصيد: لا يقبل رحلة إذا محفظته فارغة
+          if (Number(driver.walletBalance || 0) <= 0) {
+            socket.emit("request:accept_failed", { reason: "wallet_empty", balance: Number(driver.walletBalance || 0) });
             return;
           }
 
@@ -282,91 +325,134 @@ const init = async (io) => {
       });
 
       // إنهاء الرحلة
-      socket.on("driver:end_trip", async ({ requestId }) => {
+      // يُرسل السائق: { requestId, paymentMethod: 'cash'|'online', finalFare: number }
+      socket.on("driver:end_trip", async ({ requestId, paymentMethod, finalFare }) => {
         try {
           const req = await RideRequest.findByPk(requestId);
           if (!req) return;
+          if (["completed", "cancelled"].includes(req.status)) return;
 
-          // mark completed
-          req.status = "completed";
-          await req.save();
-          await redisClient.del(`driver:busy:${req.driver_id}`);
-          // notify rider
-          const riderSocketId = await redisClient.get(`socket:rider:${req.rider_id}`);
-          const payload = { requestId: req.id, status: req.status };
-          if (riderSocketId && ioInstance) ioInstance.to(riderSocketId).emit("trip:status_changed", payload);
+          // التحقق من المدخلات
+          const method = ["cash", "online"].includes(paymentMethod) ? paymentMethod : "cash";
+          const fare = parseFloat(finalFare) || parseFloat(req.estimatedFare) || 0;
 
-          // --- Debt / commission handling (MySQL only) ---
+          // احتساب العمولة
+          let commissionAmount = 0;
           try {
-            // load latest settings
             const commissionTypeSetting = await SystemSetting.findOne({ where: { key: "DRIVER_COMMISSION_TYPE" } });
             const commissionValueSetting = await SystemSetting.findOne({ where: { key: "DRIVER_COMMISSION_VALUE" } });
-            const debtLimitSetting = await SystemSetting.findOne({ where: { key: "DRIVER_DEBT_LIMIT" } });
+            const commissionType = commissionTypeSetting?.value || "percent";
+            const commissionValue = parseFloat(commissionValueSetting?.value || 0);
 
-            const commissionType = commissionTypeSetting ? (commissionTypeSetting.value || "fixed") : "fixed";
-            const commissionValue = commissionValueSetting ? parseFloat(commissionValueSetting.value) : 0;
-            const systemLimit = debtLimitSetting ? parseFloat(debtLimitSetting.value) : null;
-
-            // calculate commission amount
-            let commissionAmount = 0;
             if (commissionType === "percent") {
-              const fare = req.estimatedFare ? parseFloat(req.estimatedFare) : 0;
-              commissionAmount = (fare * (commissionValue || 0)) / 100;
+              commissionAmount = (fare * commissionValue) / 100;
             } else {
-              commissionAmount = commissionValue || 0;
-            }
-
-            // Only charge if amount > 0
-            if (commissionAmount > 0) {
-              const t = await sequelize.transaction();
-              try {
-                const driver = await User.findByPk(req.driver_id, { transaction: t, lock: t.LOCK.UPDATE });
-                if (driver) {
-                  const prevDebt = parseFloat(driver.driverDebt || 0);
-                  const newDebt = prevDebt + commissionAmount;
-                  driver.driverDebt = newDebt;
-
-                  // determine limit: override or system
-                  const limit = driver.driverDebtLimitOverride != null ? parseFloat(driver.driverDebtLimitOverride) : (systemLimit != null ? systemLimit : null);
-
-                  // add ledger
-                  await DriverDebtLedger.create({ driver_id: driver.id, ride_request_id: req.id, type: "charge", amount: commissionAmount, note: "commission on completed ride" }, { transaction: t });
-
-                  // block if reached limit
-                  if (limit != null && newDebt >= limit) {
-                    driver.isDebtBlocked = true;
-                    driver.blockReason = "debt";
-
-                    await redisClient.sAdd("drivers:debt_blocked", String(driver.id));
-
-                    try {
-                      await redisClient.del(`driver:state:${driver.id}`);
-                      await redisClient.sRem("drivers:online", String(driver.id));
-                      await redisClient.sendCommand(["ZREM", "drivers:geo", String(driver.id)]);
-                      await redisClient.del(`driver:loc:${driver.id}`);
-                    } catch (e) {}
-                    // notify driver via socket or push
-                    try {
-                      const sid = await redisClient.get(`socket:driver:${driver.id}`);
-                      const payload2 = { debt: newDebt, limit };
-                      if (sid && ioInstance) ioInstance.to(sid).emit("driver:debt_blocked", payload2);
-                      else await notifications.sendNotificationToUser(driver.id, `تم حظرك بسبب تجاوز حد الدين ${limit}`);
-                    } catch (e) {}
-                  }
-
-                  await driver.save({ transaction: t });
-                }
-                await t.commit();
-              } catch (err) {
-                await t.rollback();
-                console.error("commission transaction error", err.message);
-              }
+              commissionAmount = commissionValue;
             }
           } catch (e) {
-            console.error("debt handling error", e.message);
+            console.error("commission calc error", e.message);
           }
 
-        } catch (e) { console.error(e.message); }
+          const driverEarnings = method === "online" ? fare - commissionAmount : 0;
+          const commissionCents = Math.round(commissionAmount * 100);
+          const earningsCents = Math.round(driverEarnings * 100);
+
+          // تطبيق تأثير المحفظة حسب طريقة الدفع
+          let walletResult = null;
+          try {
+            if (method === "online" && earningsCents > 0) {
+              // أونلاين: نضيف صافي أرباح السائق لمحفظته
+              walletResult = await applyDriverWalletTx({
+                userId: req.driver_id,
+                type: "credit",
+                amountCents: earningsCents,
+                note: `أرباح رحلة أونلاين #${req.id} (بعد خصم عمولة ${commissionAmount.toFixed(2)})`,
+                metadata: { source: "ride_online", rideId: req.id, fare, commission: commissionAmount },
+                rideRequestId: req.id,
+              });
+            } else if (method === "cash" && commissionCents > 0) {
+              // كاش: نخصم نسبة الأدمن من محفظة السائق
+              walletResult = await applyDriverWalletTx({
+                userId: req.driver_id,
+                type: "debit",
+                amountCents: commissionCents,
+                note: `عمولة رحلة كاش #${req.id} (من أجرة ${fare})`,
+                metadata: { source: "ride_cash", rideId: req.id, fare, commission: commissionAmount },
+                rideRequestId: req.id,
+              });
+            }
+          } catch (walletErr) {
+            // إذا رصيد السائق غير كافٍ للكاش - أخبره لكن أكمل الرحلة
+            if (walletErr.code === "wallet_insufficient_balance") {
+              console.warn(`⚠️ driver ${req.driver_id} has insufficient wallet for cash commission`);
+              try {
+                const sid = await redisClient.get(`socket:driver:${req.driver_id}`);
+                if (sid && ioInstance) {
+                  ioInstance.to(sid).emit("driver:wallet_blocked", {
+                    reason: "wallet_empty",
+                    message: "رصيدك صفر، يجب شحن محفظتك لاستقبال رحلات جديدة",
+                    balance: 0,
+                  });
+                } else {
+                  await notifications.sendNotificationToUser(req.driver_id, "رصيد محفظتك صفر", "يجب شحن المحفظة لاستقبال رحلات جديدة");
+                }
+              } catch (e) {}
+            } else {
+              console.error("wallet tx error on end_trip", walletErr.message);
+            }
+          }
+
+          // تحديث حالة الرحلة وحقول الدفع
+          req.status = "completed";
+          req.paymentMethod = method;
+          req.finalFare = fare.toFixed(2);
+          req.adminCommission = commissionAmount.toFixed(2);
+          req.driverEarnings = driverEarnings.toFixed(2);
+          await req.save();
+          await redisClient.del(`driver:busy:${req.driver_id}`);
+
+          // إخبار الراكب
+          const riderSocketId = await redisClient.get(`socket:rider:${req.rider_id}`);
+          const payload = {
+            requestId: req.id,
+            status: "completed",
+            paymentMethod: method,
+            finalFare: fare,
+          };
+          if (riderSocketId && ioInstance) ioInstance.to(riderSocketId).emit("trip:status_changed", payload);
+
+          // إخبار السائق بنتيجة المحفظة
+          const driverSid = await redisClient.get(`socket:driver:${req.driver_id}`);
+          const walletPayload = {
+            requestId: req.id,
+            paymentMethod: method,
+            finalFare: fare,
+            commission: commissionAmount,
+            driverEarnings,
+            newBalance: walletResult ? walletResult.balanceAfter : null,
+          };
+          if (driverSid && ioInstance) ioInstance.to(driverSid).emit("trip:completed", walletPayload);
+
+          // تنبيه إذا رصيد السائق وصل لصفر بعد الرحلة
+          if (walletResult && walletResult.balanceAfter <= 0) {
+            try {
+              // أخرج السائق من الأونلاين
+              await redisClient.del(`driver:state:${req.driver_id}`);
+              await redisClient.sRem("drivers:online", String(req.driver_id));
+              await redisClient.sendCommand(["ZREM", "drivers:geo", String(req.driver_id)]);
+              if (driverSid && ioInstance) {
+                ioInstance.to(driverSid).emit("driver:wallet_blocked", {
+                  reason: "wallet_empty",
+                  message: "رصيد محفظتك وصل لصفر. يجب الشحن لاستقبال رحلات جديدة.",
+                  balance: walletResult.balanceAfter,
+                });
+              } else {
+                await notifications.sendNotificationToUser(req.driver_id, "محفظتك فارغة", "اشحن محفظتك لاستقبال رحلات جديدة");
+              }
+            } catch (e) {}
+          }
+
+        } catch (e) { console.error("driver:end_trip error", e.message); }
       });
 
       //  إنشاء طلب الرحلة من قبل الراكب
@@ -502,12 +588,14 @@ const init = async (io) => {
             if (isDebtBlocked) continue;
 
             const driver = await User.findByPk(did, {
-              attributes: ["id", "role", "status", "serviceType"],
+              attributes: ["id", "role", "status", "serviceType", "walletBalance"],
             });
 
             if (!driver) continue;
             if (driver.role !== "driver") continue;
             if (driver.status !== "active") continue;
+            // السائق يجب أن يكون لديه رصيد في المحفظة
+            if (Number(driver.walletBalance || 0) <= 0) continue;
 
             const driverType = driver.serviceType || "normal";
 

@@ -39,6 +39,20 @@ const RideRequest = sequelize.define(
     estimatedFare: { type: DataTypes.DECIMAL(10, 2), allowNull: true },
     distanceKm: { type: DataTypes.DECIMAL(10, 3), allowNull: true },
     durationMin: { type: DataTypes.DECIMAL(10, 2), allowNull: true },
+
+    // ─── حقول الدفع والعمولة ────────────────────────────────────────────────
+    // طريقة الدفع: يرسلها السائق عند إنهاء الرحلة
+    paymentMethod: {
+      type: DataTypes.ENUM("cash", "online"),
+      allowNull: true,
+      defaultValue: null,
+    },
+    // الأجرة الفعلية كما دفعها الراكب
+    finalFare: { type: DataTypes.DECIMAL(14, 2), allowNull: true, defaultValue: null },
+    // نصيب الأدمن من الرحلة
+    adminCommission: { type: DataTypes.DECIMAL(14, 2), allowNull: true, defaultValue: null },
+    // صافي ما يحصل عليه السائق
+    driverEarnings: { type: DataTypes.DECIMAL(14, 2), allowNull: true, defaultValue: null },
   },
   {
     timestamps: true,

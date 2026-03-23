@@ -1,11 +1,40 @@
 const express = require("express");
 const router = express.Router();
 const { authenticateToken } = require("../middlewares/auth");
-const { RideRequest, User } = require("../models");
+const { RideRequest, User, SystemSetting, WalletTransaction } = require("../models");
 const redisService = require("../services/redis");
 const socketService = require("../services/socket");
 const { Op } = require("sequelize");
 const { buildEstimatedFare } = require("../services/fareCalculator");
+const sequelize = require("../config/db");
+
+// ─── Wallet helper (commission + wallet update) ───────────────────────────────────
+const centsToDecimal = (c) => (c / 100).toFixed(2);
+
+const applyDriverWalletTx = async ({ userId, type, amountCents, note, metadata, rideRequestId }, t) => {
+  const driver = await User.findByPk(userId, { transaction: t, lock: t.LOCK.UPDATE });
+  if (!driver) throw Object.assign(new Error("driver_not_found"), { code: "driver_not_found" });
+
+  const beforeCents = Math.round(Number(driver.walletBalance || 0) * 100);
+  const afterCents = beforeCents + (type === "credit" ? amountCents : -amountCents);
+  if (afterCents < 0) throw Object.assign(new Error("wallet_insufficient_balance"), { code: "wallet_insufficient_balance" });
+
+  driver.walletBalance = centsToDecimal(afterCents);
+  await driver.save({ transaction: t });
+
+  await WalletTransaction.create({
+    user_id: driver.id, type,
+    amount: centsToDecimal(amountCents),
+    balance_before: centsToDecimal(beforeCents),
+    balance_after: centsToDecimal(afterCents),
+    reference: rideRequestId ? `ride:${rideRequestId}` : null,
+    note: note || null,
+    metadata: metadata || null,
+    created_by: null,
+  }, { transaction: t });
+
+  return { balanceAfter: Number(driver.walletBalance) };
+};
 
 // إنشاء طلب رحلة جديد (REST)
 router.post("/ride-requests", authenticateToken, async (req, res) => {
@@ -94,12 +123,14 @@ router.post("/ride-requests", authenticateToken, async (req, res) => {
       if (busyRideId) continue;
 
       const driver = await User.findByPk(did, {
-        attributes: ["id", "role", "status", "serviceType"],
+        attributes: ["id", "role", "status", "serviceType", "walletBalance"],
       });
 
       if (!driver) continue;
       if (driver.role !== "driver") continue;
       if (driver.status !== "active") continue;
+      // فحص رصيد المحفظة: السائق يجب أن يكون لديه رصيد
+      if (Number(driver.walletBalance || 0) <= 0) continue;
 
       const driverType = driver.serviceType || "normal";
 
@@ -264,4 +295,135 @@ router.get("/ride-requests/driver/:driverId", async (req, res) => {
   }
 });
 
-module.exports = router;
+// POST /ride-requests/:id/complete
+// السائق يُكمل الرحلة ويحدد طريقة الدفع والأجرة الفعلية
+router.post("/ride-requests/:id/complete", authenticateToken, async (req, res) => {
+  const t = await sequelize.transaction();
+  try {
+    const { paymentMethod, finalFare } = req.body;
+    const rideId = Number(req.params.id);
+
+    // التحقق من المدخلات
+    if (!["cash", "online"].includes(paymentMethod)) {
+      await t.rollback();
+      return res.status(400).json({ error: "paymentMethod يجب أن يكون cash أو online" });
+    }
+    const fare = parseFloat(finalFare);
+    if (!Number.isFinite(fare) || fare < 0) {
+      await t.rollback();
+      return res.status(400).json({ error: "finalFare يجب أن يكون رقم موجب" });
+    }
+
+    const ride = await RideRequest.findByPk(rideId, { transaction: t, lock: t.LOCK.UPDATE });
+    if (!ride) { await t.rollback(); return res.status(404).json({ error: "الرحلة غير موجودة" }); }
+    if (ride.status === "completed") { await t.rollback(); return res.status(400).json({ error: "الرحلة مكتملة مسبقاً" }); }
+    if (["cancelled"].includes(ride.status)) { await t.rollback(); return res.status(400).json({ error: "لا يمكن إكمال رحلة ملغاة" }); }
+
+    // التأكد من أن الطالب هو السائق المعين
+    if (req.user.role === "driver" && ride.driver_id !== req.user.id) {
+      await t.rollback();
+      return res.status(403).json({ error: "غير مصرح: أنت لست سائق هذه الرحلة" });
+    }
+
+    // احتساب العمولة
+    let commissionAmount = 0;
+    const commissionTypeSetting = await SystemSetting.findOne({ where: { key: "DRIVER_COMMISSION_TYPE" }, transaction: t });
+    const commissionValueSetting = await SystemSetting.findOne({ where: { key: "DRIVER_COMMISSION_VALUE" }, transaction: t });
+    const commissionType = commissionTypeSetting?.value || "percent";
+    const commissionValue = parseFloat(commissionValueSetting?.value || 0);
+
+    if (commissionType === "percent") {
+      commissionAmount = (fare * commissionValue) / 100;
+    } else {
+      commissionAmount = commissionValue;
+    }
+
+    const driverEarnings = paymentMethod === "online" ? fare - commissionAmount : 0;
+    const commissionCents = Math.round(commissionAmount * 100);
+    const earningsCents = Math.round(driverEarnings * 100);
+
+    // تطبيق المحفظة
+    let walletResult = null;
+    if (paymentMethod === "online" && earningsCents > 0) {
+      // أونلاين: نضيف صافي أرباح السائق
+      walletResult = await applyDriverWalletTx({
+        userId: ride.driver_id,
+        type: "credit",
+        amountCents: earningsCents,
+        note: `أرباح رحلة أونلاين #${ride.id} (بعد خصم عمولة ${commissionAmount.toFixed(2)})`,
+        metadata: { source: "ride_online", rideId: ride.id, fare, commission: commissionAmount },
+        rideRequestId: ride.id,
+      }, t);
+    } else if (paymentMethod === "cash" && commissionCents > 0) {
+      // كاش: نخصم نسبة الأدمن من محفظة السائق
+      walletResult = await applyDriverWalletTx({
+        userId: ride.driver_id,
+        type: "debit",
+        amountCents: commissionCents,
+        note: `عمولة رحلة كاش #${ride.id} (من أجرة ${fare})`,
+        metadata: { source: "ride_cash", rideId: ride.id, fare, commission: commissionAmount },
+        rideRequestId: ride.id,
+      }, t);
+    }
+
+    // تحديث الرحلة
+    ride.status = "completed";
+    ride.paymentMethod = paymentMethod;
+    ride.finalFare = fare.toFixed(2);
+    ride.adminCommission = commissionAmount.toFixed(2);
+    ride.driverEarnings = driverEarnings.toFixed(2);
+    await ride.save({ transaction: t });
+    await t.commit();
+
+    // إزالة الانشغال من Redis
+    try {
+      const redisClient = await redisService.init();
+      await redisClient.del(`driver:busy:${ride.driver_id}`);
+
+      // إخبار الراكب عبر Socket
+      await socketService.notifyRiderSocket(ride.rider_id, "trip:status_changed", {
+        requestId: ride.id, status: "completed", paymentMethod, finalFare: fare,
+      });
+
+      // إخبار السائق بنتيجة المحفظة
+      await socketService.notifyDriverSocket(ride.driver_id, "trip:completed", {
+        requestId: ride.id, paymentMethod, finalFare: fare,
+        commission: commissionAmount, driverEarnings,
+        newBalance: walletResult ? walletResult.balanceAfter : null,
+      });
+
+      // إذا وصل رصيد السائق لصفر → أخرجه من الأونلاين
+      if (walletResult && walletResult.balanceAfter <= 0) {
+        await redisClient.del(`driver:state:${ride.driver_id}`);
+        await redisClient.sRem("drivers:online", String(ride.driver_id));
+        await redisClient.sendCommand(["ZREM", "drivers:geo", String(ride.driver_id)]);
+        await socketService.notifyDriverSocket(ride.driver_id, "driver:wallet_blocked", {
+          reason: "wallet_empty",
+          message: "رصيد محفظتك وصل لصفر. يجب الشحن لاستقبال رحلات جديدة.",
+          balance: walletResult.balanceAfter,
+        });
+      }
+    } catch (e) { console.error("post-complete redis/socket error", e.message); }
+
+    return res.status(200).json({
+      success: true,
+      ride,
+      payment: {
+        method: paymentMethod,
+        finalFare: fare,
+        adminCommission: commissionAmount,
+        driverEarnings,
+        driverWalletBalance: walletResult ? walletResult.balanceAfter : null,
+      },
+    });
+  } catch (err) {
+    try { await t.rollback(); } catch (_) {}
+    if (err.code === "wallet_insufficient_balance") {
+      return res.status(400).json({ error: "رصيد المحفظة غير كافٍ لخصم عمولة الكاش. يجب شحن المحفظة." });
+    }
+    console.error("❌ complete ride error:", err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+module.exports = router;
