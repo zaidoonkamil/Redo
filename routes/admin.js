@@ -563,4 +563,24 @@ router.post("/admin/migrate/run", requireAdmin, async (req, res) => {
   });
 });
 
+// POST /admin/redis/clear-debt-blocked
+// ينظّف قائمة drivers:debt_blocked من Redis (بقايا النظام القديم)
+router.post("/admin/redis/clear-debt-blocked", requireAdmin, async (req, res) => {
+  try {
+    const redis = await redisService.init();
+    const members = await redis.sMembers("drivers:debt_blocked").catch(() => []);
+    if (members.length > 0) {
+      await redis.del("drivers:debt_blocked");
+    }
+    return res.json({
+      success: true,
+      message: `✅ تم حذف ${members.length} سائق من القائمة القديمة`,
+      clearedDrivers: members,
+    });
+  } catch (err) {
+    console.error("❌ clear-debt-blocked error:", err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 module.exports = router;

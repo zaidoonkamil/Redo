@@ -579,37 +579,38 @@ const init = async (io) => {
             const busyRideId = await redisClient.get(`driver:busy:${did}`);
             const rejectedKey = `request:rejected:${newReq.id}`;
             const isRejected = await redisClient.sIsMember(rejectedKey, String(did));
-            const isDebtBlocked = await redisClient.sIsMember("drivers:debt_blocked", String(did));
             const driverSocketId = await redisClient.get(`socket:driver:${did}`);
 
-            if (!isOnline) continue;
-            if (busyRideId) continue;
-            if (isRejected) continue;
-            if (isDebtBlocked) continue;
+            console.log(`[MATCH] driver=${did} | online=${isOnline} | busy=${busyRideId} | rejected=${isRejected} | socketId=${driverSocketId}`);
+
+            if (!isOnline) { console.log(`[MATCH] ❌ skip driver=${did}: not online`); continue; }
+            if (busyRideId) { console.log(`[MATCH] ❌ skip driver=${did}: busy`); continue; }
+            if (isRejected) { console.log(`[MATCH] ❌ skip driver=${did}: rejected`); continue; }
 
             const driver = await User.findByPk(did, {
               attributes: ["id", "role", "status", "serviceType", "walletBalance"],
             });
 
-            if (!driver) continue;
-            if (driver.role !== "driver") continue;
-            if (driver.status !== "active") continue;
-            // السائق يجب أن يكون لديه رصيد في المحفظة
-            if (Number(driver.walletBalance || 0) <= 0) continue;
+            if (!driver) { console.log(`[MATCH] ❌ skip driver=${did}: not found in DB`); continue; }
+            if (driver.role !== "driver") { console.log(`[MATCH] ❌ skip driver=${did}: role=${driver.role}`); continue; }
+            if (driver.status !== "active") { console.log(`[MATCH] ❌ skip driver=${did}: status=${driver.status}`); continue; }
+            if (Number(driver.walletBalance || 0) <= 0) { console.log(`[MATCH] ❌ skip driver=${did}: wallet=${driver.walletBalance}`); continue; }
 
             const driverType = driver.serviceType || "normal";
-
             const canReceive =
               newReq.serviceType === "normal"
                 ? ["normal", "vip"].includes(driverType)
                 : driverType === "vip";
 
-            if (!canReceive) continue;
+            if (!canReceive) { console.log(`[MATCH] ❌ skip driver=${did}: serviceType mismatch (driver=${driverType}, req=${newReq.serviceType})`); continue; }
 
             if (driverSocketId && ioInstance) {
               ioInstance.to(driverSocketId).emit("request:new", { request: newReq });
               sentCount++;
               await redisClient.sAdd(sentKey, String(did));
+              console.log(`[MATCH] ✅ sent to driver=${did} socket=${driverSocketId}`);
+            } else {
+              console.log(`[MATCH] ❌ skip driver=${did}: socketId=${driverSocketId} ioInstance=${!!ioInstance}`);
             }
           }
 
