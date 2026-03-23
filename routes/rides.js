@@ -341,6 +341,22 @@ router.post("/ride-requests/:id/complete", authenticateToken, async (req, res) =
     const driverEarnings = paymentMethod === "online" ? fare - commissionAmount : 0;
     const commissionCents = Math.round(commissionAmount * 100);
     const earningsCents = Math.round(driverEarnings * 100);
+    const fareCents = Math.round(fare * 100);
+
+    // ── فحص رصيد الزبون قبل الدفع الأونلاين ─────────────────────────────
+    if (paymentMethod === "online") {
+      const rider = await User.findByPk(ride.rider_id, { transaction: t });
+      const riderBalanceCents = Math.round((parseFloat(rider?.walletBalance || 0)) * 100);
+      if (riderBalanceCents < fareCents) {
+        await t.rollback();
+        return res.status(402).json({
+          error: "insufficient_balance",
+          message: "رصيد محفظتك غير كافٍ. يرجى شحن المحفظة وإعادة المحاولة",
+          required: fare,
+          available: parseFloat(rider?.walletBalance || 0),
+        });
+      }
+    }
 
     // تطبيق المحفظة
     let walletResult = null;
