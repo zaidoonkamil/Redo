@@ -512,4 +512,55 @@ router.post("/admin/users/:id/wallet/debit", requireAdmin, async (req, res) => {
   }
 });
 
+// ─── Admin: Database Migration ──────────────────────────────────────────────
+// POST /admin/migrate/run
+// يضيف الأعمدة الناقصة في قاعدة البيانات (آمن - لا يُعيد إنشاء شيء موجود)
+router.post("/admin/migrate/run", requireAdmin, async (req, res) => {
+  const results = [];
+
+  const safeAlter = async (label, sql) => {
+    try {
+      await sequelize.query(sql);
+      results.push({ column: label, status: "✅ added or already exists" });
+    } catch (err) {
+      // خطأ 1060 = العمود موجود مسبقاً (Duplicate column name) - نتجاهله
+      if (err.original?.errno === 1060 || err.parent?.errno === 1060) {
+        results.push({ column: label, status: "⚠️ already exists (skipped)" });
+      } else {
+        results.push({ column: label, status: `❌ error: ${err.message}` });
+      }
+    }
+  };
+
+  // ─── ride_requests ────────────────────────────────────────────────────────
+  await safeAlter(
+    "ride_requests.paymentMethod",
+    `ALTER TABLE ride_requests ADD COLUMN paymentMethod ENUM('cash','online') NULL DEFAULT NULL`
+  );
+  await safeAlter(
+    "ride_requests.finalFare",
+    `ALTER TABLE ride_requests ADD COLUMN finalFare DECIMAL(14,2) NULL DEFAULT NULL`
+  );
+  await safeAlter(
+    "ride_requests.adminCommission",
+    `ALTER TABLE ride_requests ADD COLUMN adminCommission DECIMAL(14,2) NULL DEFAULT NULL`
+  );
+  await safeAlter(
+    "ride_requests.driverEarnings",
+    `ALTER TABLE ride_requests ADD COLUMN driverEarnings DECIMAL(14,2) NULL DEFAULT NULL`
+  );
+
+  // ─── Users (walletBalance - قد يكون موجود مسبقًا) ────────────────────────
+  await safeAlter(
+    "users.walletBalance",
+    `ALTER TABLE Users ADD COLUMN walletBalance DECIMAL(14,2) NOT NULL DEFAULT 0`
+  );
+
+  const hasError = results.some((r) => r.status.startsWith("❌"));
+  return res.status(hasError ? 500 : 200).json({
+    message: hasError ? "بعض الأعمدة فشلت" : "✅ المايغريشن اكتمل",
+    results,
+  });
+});
+
 module.exports = router;
