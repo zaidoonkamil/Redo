@@ -443,7 +443,7 @@ router.post("/ride-requests/:id/complete", authenticateToken, async (req, res) =
         finalFare: fare,
         adminCommission: commissionAmount,
         driverEarnings,
-        driverWalletBalance: walletResult ? walletResult.balanceAfter : null,
+        driverWalletBalance: driverWalletResult ? driverWalletResult.balanceAfter : null,
       },
     });
   } catch (err) {

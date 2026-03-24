@@ -51,7 +51,9 @@ const io = new Server(server, {
     await socketService.init(io);
     const chatIO = io.of("/chat");
     chat.initChatSocket(chatIO); 
-    
+    try { await sequelize.query("ALTER TABLE `Users` ADD COLUMN `walletBalance` DECIMAL(14,2) NOT NULL DEFAULT 0.00;"); } catch (e) {}
+    try { await sequelize.query("ALTER TABLE `RideRequests` ADD COLUMN `paymentMethod` ENUM('cash','online') NULL DEFAULT 'cash';"); } catch (e) {}
+
     await sequelize.sync({ force: false });
     console.log("✅ Database & tables synced!");
 
