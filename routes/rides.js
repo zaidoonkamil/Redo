@@ -11,19 +11,19 @@ const sequelize = require("../config/db");
 // ─── Wallet helper (commission + wallet update) ───────────────────────────────────
 const centsToDecimal = (c) => (c / 100).toFixed(2);
 
-const applyDriverWalletTx = async ({ userId, type, amountCents, note, metadata, rideRequestId }, t) => {
-  const driver = await User.findByPk(userId, { transaction: t, lock: t.LOCK.UPDATE });
-  if (!driver) throw Object.assign(new Error("driver_not_found"), { code: "driver_not_found" });
+const applyWalletTx = async ({ userId, type, amountCents, note, metadata, rideRequestId }, t) => {
+  const user = await User.findByPk(userId, { transaction: t, lock: t.LOCK.UPDATE });
+  if (!user) throw Object.assign(new Error("user_not_found"), { code: "user_not_found" });
 
-  const beforeCents = Math.round(Number(driver.walletBalance || 0) * 100);
+  const beforeCents = Math.round(Number(user.walletBalance || 0) * 100);
   const afterCents = beforeCents + (type === "credit" ? amountCents : -amountCents);
   if (afterCents < 0) throw Object.assign(new Error("wallet_insufficient_balance"), { code: "wallet_insufficient_balance" });
 
-  driver.walletBalance = centsToDecimal(afterCents);
-  await driver.save({ transaction: t });
+  user.walletBalance = centsToDecimal(afterCents);
+  await user.save({ transaction: t });
 
   await WalletTransaction.create({
-    user_id: driver.id, type,
+    user_id: user.id, type,
     amount: centsToDecimal(amountCents),
     balance_before: centsToDecimal(beforeCents),
     balance_after: centsToDecimal(afterCents),
@@ -33,7 +33,7 @@ const applyDriverWalletTx = async ({ userId, type, amountCents, note, metadata, 
     created_by: null,
   }, { transaction: t });
 
-  return { balanceAfter: Number(driver.walletBalance) };
+  return { balanceAfter: Number(user.walletBalance) };
 };
 
 // إنشاء طلب رحلة جديد (REST)
@@ -359,20 +359,34 @@ router.post("/ride-requests/:id/complete", authenticateToken, async (req, res) =
     }
 
     // تطبيق المحفظة
-    let walletResult = null;
-    if (paymentMethod === "online" && earningsCents > 0) {
-      // أونلاين: نضيف صافي أرباح السائق
-      walletResult = await applyDriverWalletTx({
-        userId: ride.driver_id,
-        type: "credit",
-        amountCents: earningsCents,
-        note: `أرباح رحلة أونلاين #${ride.id} (بعد خصم عمولة ${commissionAmount.toFixed(2)})`,
-        metadata: { source: "ride_online", rideId: ride.id, fare, commission: commissionAmount },
-        rideRequestId: ride.id,
-      }, t);
+    let driverWalletResult = null;
+    if (paymentMethod === "online") {
+      // 1. خصم الأجرة من محفظة الزبون
+      if (fareCents > 0) {
+        await applyWalletTx({
+          userId: ride.rider_id,
+          type: "debit",
+          amountCents: fareCents,
+          note: `دفع أجرة رحلة #${ride.id} أونلاين`,
+          metadata: { source: "ride_online_payment", rideId: ride.id, fare },
+          rideRequestId: ride.id,
+        }, t);
+      }
+
+      // 2. إضافة الأرباح إلى محفظة السائق
+      if (earningsCents > 0) {
+        driverWalletResult = await applyWalletTx({
+          userId: ride.driver_id,
+          type: "credit",
+          amountCents: earningsCents,
+          note: `أرباح رحلة أونلاين #${ride.id} (بعد خصم عمولة ${commissionAmount.toFixed(2)})`,
+          metadata: { source: "ride_online", rideId: ride.id, fare, commission: commissionAmount },
+          rideRequestId: ride.id,
+        }, t);
+      }
     } else if (paymentMethod === "cash" && commissionCents > 0) {
       // كاش: نخصم نسبة الأدمن من محفظة السائق
-      walletResult = await applyDriverWalletTx({
+      driverWalletResult = await applyWalletTx({
         userId: ride.driver_id,
         type: "debit",
         amountCents: commissionCents,
@@ -405,18 +419,18 @@ router.post("/ride-requests/:id/complete", authenticateToken, async (req, res) =
       await socketService.notifyDriverSocket(ride.driver_id, "trip:completed", {
         requestId: ride.id, paymentMethod, finalFare: fare,
         commission: commissionAmount, driverEarnings,
-        newBalance: walletResult ? walletResult.balanceAfter : null,
+        newBalance: driverWalletResult ? driverWalletResult.balanceAfter : null,
       });
 
       // إذا وصل رصيد السائق لصفر → أخرجه من الأونلاين
-      if (walletResult && walletResult.balanceAfter <= 0) {
+      if (driverWalletResult && driverWalletResult.balanceAfter <= 0) {
         await redisClient.del(`driver:state:${ride.driver_id}`);
         await redisClient.sRem("drivers:online", String(ride.driver_id));
         await redisClient.sendCommand(["ZREM", "drivers:geo", String(ride.driver_id)]);
         await socketService.notifyDriverSocket(ride.driver_id, "driver:wallet_blocked", {
           reason: "wallet_empty",
           message: "رصيد محفظتك وصل لصفر. يجب الشحن لاستقبال رحلات جديدة.",
-          balance: walletResult.balanceAfter,
+          balance: driverWalletResult.balanceAfter,
         });
       }
     } catch (e) { console.error("post-complete redis/socket error", e.message); }
