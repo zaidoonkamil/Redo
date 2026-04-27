@@ -8,6 +8,8 @@ const ridesRouter = require("./routes/rides");
 const adminRouter = require("./routes/admin");
 const adminStatsRouter = require("./routes/adminStats");
 const adminDebtRouter = require("./routes/adminDebt");
+const whatsappRouter = require("./routes/whatsapp");
+const { startWhatsAppAutoInit } = require("./services/waSender");
 
 const redisService = require("./services/redis");
 const socketService = require("./services/socket");
@@ -33,6 +35,7 @@ app.use("/", ridesRouter);
 app.use("/", adminRouter);
 app.use("/", adminStatsRouter);
 app.use("/", adminDebtRouter);
+app.use("/", whatsappRouter);
 app.use("/", chat.router);
 
 const server = http.createServer(app);
@@ -55,13 +58,15 @@ const io = new Server(server, {
     try { await sequelize.query("ALTER TABLE `RideRequests` ADD COLUMN `paymentMethod` ENUM('cash','online') NULL DEFAULT 'cash';"); } catch (e) {}
 
     await sequelize.sync({ force: false });
-    console.log("✅ Database & tables synced!");
+    startWhatsAppAutoInit();
+    console.log("Database & tables synced!");
 
     server.listen(process.env.PORT || 1004, () => {
-      console.log(`🚀 Server running on http://localhost:${process.env.PORT || 1004}`);
+      console.log("Server running on http://localhost:" + (process.env.PORT || 1004));
     });
   } catch (err) {
-    console.error("❌ Startup error:", err);
+    console.error("Startup error:", err);
     process.exit(1);
   }
 })();
+
